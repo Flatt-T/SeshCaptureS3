@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>conferenceBuddy – local capture → S3</title>
+<link rel="icon" href="data:;base64,=">
+<style>
+  :root { --bg:#0f172a; --card:#111827; --ink:#e5e7eb; --muted:#9ca3af; --accent:#22c55e; --warn:#f59e0b; }
+  html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Inter;}
+  .wrap{max-width:960px;margin:auto;padding:24px;display:grid;gap:16px}
+  .card{background:var(--card);border:1px solid #1f2937;border-radius:12px;padding:16px}
+  h1{margin:0 0 8px;font-size:20px}
+  h2{margin:0 0 8px;font-size:16px;color:var(--muted)}
+  label{display:block;margin:10px 0 4px}
+  input,textarea,select,button{width:100%;padding:10px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:var(--ink)}
+  textarea{min-height:96px}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#0b1220;border:1px solid #1f2937;color:var(--muted);margin-right:6px}
+  .ok{color:var(--accent)} .warn{color:var(--warn)}
+  .btn{background:#16a34a;border:0;cursor:pointer}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap}
+  small{color:var(--muted)}
+  .thumb{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:8px;border:1px solid #1f2937}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+</style>
+<!-- AWS JS SDK v2 (browser bundle) -->
+<script src="https://sdk.amazonaws.com/js/aws-sdk-2.1481.0.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <h1>conferenceBuddy — local capture → S3</h1>
+    <p><small>Goal: create Conferences & Sessions locally, capture <b>images</b>, <b>audio</b>, <b>notes</b>, and upload to S3 with the exact structure. No OCR/transcription.</small></p>
+    <p class="mono">/conferences/{conference_id}/<br>
+      &nbsp;&nbsp;reports/<br>
+      &nbsp;&nbsp;sessions/{session_id}/ session.txt · index.txt · session_{session_id}.txt<br>
+      &nbsp;&nbsp;audio/{session_id}__{timestamp}.m4a + .meta.txt<br>
+      &nbsp;&nbsp;images/{session_id}__{timestamp}.jpg + .meta.txt<br>
+      &nbsp;&nbsp;notes/{session_id}__{timestamp}.txt + .meta.txt</p>
+  </div>
+
+  <div class="card">
+    <h2>1) S3 Settings (stored locally)</h2>
+    <div class="row">
+      <div>
+        <label>Region</label>
+        <input id="region" placeholder="eu-west-2" />
+      </div>
+      <div>
+        <label>Bucket</label>
+        <input id="bucket" placeholder="confbud" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Access Key ID</label>
+        <input id="ak" placeholder="AKIA..." />
+      </div>
+      <div>
+        <label>Secret Access Key</label>
+        <input id="sk" placeholder="••••" />
+      </div>
+    </div>
+    <div class="toolbar">
+      <button class="btn" id="saveSettings">Save</button>
+      <button id="testS3">Test S3</button>
+      <span id="s3Status" class="pill">not tested</span>
+    </div>
+    <small>⚠️ for demos only — keys live in <code>localStorage</code>. Use pre-signed URLs for production.</small>
+  </div>
+
+  <div class="card">
+    <h2>2) Conference & Session</h2>
+    <div class="row">
+      <div>
+        <label>Conference ID (UUID)</label>
+        <input id="confId" />
+      </div>
+      <div>
+        <label>Session ID (UUID)</label>
+        <input id="sessId" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Conference Name</label>
+        <input id="confName" />
+      </div>
+      <div>
+        <label>Session Name</label>
+        <input id="sessName" />
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Vendor Name (optional)</label>
+        <input id="vendorName" />
+      </div>
+      <div>
+        <label>Location (optional)</label>
+        <input id="location" />
+      </div>
+    </div>
+    <div class="toolbar">
+      <button id="genIds">Generate IDs</button>
+      <button class="btn" id="createSessionFiles">Create/Update Session Files</button>
+      <span id="sessionStatus" class="pill">session files not created</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>3) Capture</h2>
+    <div class="row">
+      <div>
+        <label>Images</label>
+        <input id="imgPick" type="file" accept="image/*" capture="environment" multiple />
+        <div id="imgGrid" class="grid"></div>
+      </div>
+      <div>
+        <label>Audio</label>
+        <div class="toolbar">
+          <button id="recToggle">Start Recording</button>
+          <span id="recStatus" class="pill">idle</span>
+        </div>
+        <div id="audioList"></div>
+      </div>
+    </div>
+    <label>Notes</label>
+    <textarea id="noteText" placeholder="Type a note, then 'Add Note'"></textarea>
+    <div class="toolbar">
+      <button id="addNote">Add Note</button>
+      <span id="noteStatus" class="pill">0 notes</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>4) Upload</h2>
+    <div class="toolbar">
+      <button class="btn" id="uploadAll">Upload All (media + meta + indexes)</button>
+      <button id="clearLocal">Clear Local Selections</button>
+      <span id="uploadStatus" class="pill">0 pending</span>
+    </div>
+    <div id="log" class="mono" style="white-space:pre-wrap;margin-top:8px;color:var(--muted)"></div>
+  </div>
+
+</div>
+
+<script>
+/* ========= tiny utils ========= */
+const $ = sel => document.querySelector(sel);
+const iso = d => new Date(d||Date.now()).toISOString().replace(/:/g,'-');
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxx'.replace(/x/g, ()=>(Math.random()*16|0).toString(16)));
+const mimeFromName = n => n.endsWith('.jpg')?'image/jpeg':n.endsWith('.m4a')?'audio/mp4':'text/plain';
+const b2f = (blob,name) => new File([blob], name, {type: blob.type});
+const log = (...a)=>{ const L=$('#log'); L.textContent += a.join(' ') + '\n'; L.scrollTop=L.scrollHeight; }
+
+/* ========= state ========= */
+let settings = { region:'eu-west-2', bucket:'confbud', ak:'', sk:'' };
+let session = { confId:'', sessId:'', confName:'', sessName:'', vendorName:'', location:'' };
+let images = [];   // [{file, s3key}] 
+let audios = [];   // [{file, s3key}]
+let notes  = [];   // [{file, s3key, body}]
+let uploadedKeys = new Set(); // for index.txt
+
+/* ========= settings load/save ========= */
+function loadSettings(){
+  try{ const s=JSON.parse(localStorage.cbud_settings||'{}'); Object.assign(settings,s); }catch{}
+  $('#region').value = settings.region||'';
+  $('#bucket').value = settings.bucket||'';
+  $('#ak').value     = settings.ak||'';
+  $('#sk').value     = settings.sk||'';
+}
+function saveSettings(){
+  settings.region=$('#region').value.trim();
+  settings.bucket=$('#bucket').value.trim();
+  settings.ak=$('#ak').value.trim();
+  settings.sk=$('#sk').value.trim();
+  localStorage.cbud_settings = JSON.stringify(settings);
+  AWS.config.update({region:settings.region, credentials:new AWS.Credentials(settings.ak, settings.sk)});
+  window.s3 = new AWS.S3({apiVersion:'2006-03-01', params:{Bucket:settings.bucket}});
+  $('#s3Status').textContent='saved';
+  $('#s3Status').className='pill ok';
+}
+
+/* ========= s3 helpers ========= */
+async function putObject(Key, Body, ContentType){
+  return new Promise((res,rej)=>{
+    s3.upload({Bucket:settings.bucket, Key, Body, ContentType}, (err,data)=>{
+      if(err){ rej(err); } else { uploadedKeys.add(Key); res(data); }
+    });
+  });
+}
+function ensureConfigured(){
+  if(!window.s3){ saveSettings(); }
+  if(!settings.bucket||!settings.region||!settings.ak||!settings.sk) throw new Error('missing S3 settings');
+}
+async function testS3(){
+  try{
+    ensureConfigured();
+    const Key=`cbud_test_${Date.now()}.txt`;
+    await putObject(Key, new Blob(['ok'],'text/plain'),'text/plain');
+    $('#s3Status').textContent='connected';
+    $('#s3Status').className='pill ok';
+    log('S3 test upload OK →', Key);
+  }catch(e){
+    $('#s3Status').textContent='failed';
+    $('#s3Status').className='pill warn';
+    log('S3 test failed:', e.message||e);
+  }
+}
+
+/* ========= session files ========= */
+function readForm(){
+  session.confId=$('#confId').value.trim();
+  session.sessId=$('#sessId').value.trim();
+  session.confName=$('#confName').value.trim();
+  session.sessName=$('#sessName').value.trim();
+  session.vendorName=$('#vendorName').value.trim();
+  session.location=$('#location').value.trim();
+  if(!session.confId || !session.sessId) throw new Error('conference id and session id are required');
+}
+function sessionPaths(){
+  const base = `conferences/${session.confId}`;
+  return {
+    reports:`${base}/reports/`,                           // empty folder (implicit)
+    sessDir:`${base}/sessions/${session.sessId}/`,
+    sessionTxt:`${base}/sessions/${session.sessId}/session.txt`,
+    rollupTxt:`${base}/sessions/${session.sessId}/session_${session.sessId}.txt`,
+    indexTxt:`${base}/sessions/${session.sessId}/index.txt`,
+    audioDir:`${base}/audio/`,
+    imageDir:`${base}/images/`,
+    notesDir:`${base}/notes/`
+  };
+}
+function metaText(kind, fname){
+  return [
+    `id: ${uuid()}`,
+    `type: ${kind}`,
+    `conference_id: ${session.confId}`,
+    `session_id: ${session.sessId}`,
+    `filename: ${fname}`,
+    `created_at: ${new Date().toISOString()}`,
+    `app_version: 1`,
+    `mime: ${mimeFromName(fname)}`
+  ].join('\n');
+}
+function sessionText(){
+  return [
+    `conference_id: ${session.confId}`,
+    `session_id: ${session.sessId}`,
+    `conference_name: ${session.confName}`,
+    `session_name: ${session.sessName}`,
+    `vendor_name: ${session.vendorName}`,
+    `started_at: ${new Date().toISOString()}`,
+    `location: ${session.location}`
+  ].join('\n');
+}
+
+/* ========= capture: images ========= */
+$('#imgPick').addEventListener('change', (e)=>{
+  const files = [...e.target.files];
+  const grid = $('#imgGrid');
+  files.forEach(f=>{
+    const el = document.createElement('img');
+    el.className='thumb'; el.src = URL.createObjectURL(f);
+    grid.appendChild(el);
+    images.push({file:f, s3key:null});
+  });
+  updatePending();
+});
+
+/* ========= capture: audio via MediaRecorder ========= */
+let rec, recChunks=[];
+$('#recToggle').addEventListener('click', async ()=>{
+  try{
+    if(!rec){
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      rec = new MediaRecorder(stream);
+      rec.ondataavailable = e=>recChunks.push(e.data);
+      rec.onstop = ()=>{
+        const blob = new Blob(recChunks,{type:'audio/mp4'}); recChunks=[];
+        const f = b2f(blob, 'audio_tmp.m4a');
+        audios.push({file:f, s3key:null});
+        const row=document.createElement('div'); row.textContent=`Audio clip (${Math.round(f.size/1024)} KB)`;
+        $('#audioList').appendChild(row);
+        updatePending();
+      };
+      rec.start();
+      $('#recToggle').textContent='Stop Recording';
+      $('#recStatus').textContent='recording...';
+    } else {
+      rec.stop(); rec = null;
+      $('#recToggle').textContent='Start Recording';
+      $('#recStatus').textContent='idle';
+    }
+  }catch(e){ alert('Mic error: '+e.message); }
+});
+
+/* ========= capture: notes ========= */
+$('#addNote').addEventListener('click', ()=>{
+  const body = $('#noteText').value.trim();
+  if(!body) return;
+  const blob = new Blob([body], {type:'text/plain'});
+  const f = b2f(blob, 'note_tmp.txt');
+  notes.push({file:f, s3key:null, body});
+  $('#noteText').value='';
+  $('#noteStatus').textContent=`${notes.length} notes`;
+  updatePending();
+});
+
+/* ========= create/update session files on S3 ========= */
+$('#createSessionFiles').addEventListener('click', async ()=>{
+  try{
+    ensureConfigured(); readForm();
+    const P = sessionPaths();
+    // create a zero-byte marker under reports/ (optional)
+    await putObject(`${P.reports}.keep`, new Blob([''],{type:'text/plain'}), 'text/plain');
+    // write session.txt and rollup (initial)
+    await putObject(P.sessionTxt, new Blob([sessionText()],{type:'text/plain'}), 'text/plain');
+    await putObject(P.rollupTxt, new Blob([`counts: {images:0, audio:0, notes:0}\n`+sessionText()],{type:'text/plain'}), 'text/plain');
+    // empty index.txt
+    await putObject(P.indexTxt, new Blob([''],{type:'text/plain'}), 'text/plain');
+    $('#sessionStatus').textContent='session files created';
+    $('#sessionStatus').className='pill ok';
+    log('Session files created:', P.sessionTxt);
+  }catch(e){
+    $('#sessionStatus').textContent='failed';
+    $('#sessionStatus').className='pill warn';
+    log('Session create failed:', e.message||e);
+  }
+});
+
+/* ========= upload all ========= */
+$('#uploadAll').addEventListener('click', async ()=>{
+  try{
+    ensureConfigured(); readForm();
+    const P = sessionPaths();
+    const ts = () => iso().replace('Z','Z'); // just normalized
+    let imgN=0,audN=0,noteN=0;
+
+    // IMAGES
+    for(const it of images){
+      const name = `${session.sessId}__${ts()}.jpg`;
+      it.s3key = `${P.imageDir}${name}`;
+      await putObject(it.s3key, it.file, 'image/jpeg');
+      await putObject(`${P.imageDir}${name.replace(/\.jpg$/,'.meta.txt')}`, new Blob([metaText('image', name)],{type:'text/plain'}), 'text/plain');
+      imgN++;
+      log('Uploaded image:', it.s3key);
+    }
+
+    // AUDIO
+    for(const it of audios){
+      const name = `${session.sessId}__${ts()}.m4a`;
+      it.s3key = `${P.audioDir}${name}`;
+      await putObject(it.s3key, it.file, 'audio/mp4');
+      await putObject(`${P.audioDir}${name.replace(/\.m4a$/,'.meta.txt')}`, new Blob([metaText('audio', name)],{type:'text/plain'}), 'text/plain');
+      audN++;
+      log('Uploaded audio:', it.s3key);
+    }
+
+    // NOTES (note body is the .txt file itself + meta)
+    for(const it of notes){
+      const name = `${session.sessId}__${ts()}.txt`;
+      it.s3key = `${P.notesDir}${name}`;
+      await putObject(it.s3key, it.file, 'text/plain');
+      await putObject(`${P.notesDir}${name.replace(/\.txt$/,'.meta.txt')}`, new Blob([metaText('note', name)],{type:'text/plain'}), 'text/plain');
+      noteN++;
+      log('Uploaded note:', it.s3key);
+    }
+
+    // Update per-session files
+    const rollup = [
+      `counts: {images:${imgN}, audio:${audN}, notes:${noteN}}`,
+      sessionText()
+    ].join('\n');
+    await putObject(P.rollupTxt, new Blob([rollup],{type:'text/plain'}),'text/plain');
+
+    // Index.txt (newline list of all keys we uploaded)
+    const lines = Array.from(uploadedKeys).filter(k=>k.startsWith(`conferences/${session.confId}/`)).join('\n');
+    await putObject(P.indexTxt, new Blob([lines],{type:'text/plain'}),'text/plain');
+
+    $('#uploadStatus').textContent=`uploaded ${imgN+audN+noteN} items`;
+    $('#uploadStatus').className='pill ok';
+    log('All done. Index updated:', P.indexTxt);
+  }catch(e){
+    $('#uploadStatus').textContent='failed';
+    $('#uploadStatus').className='pill warn';
+    log('Upload failed:', e.message||e);
+  }
+});
+
+/* ========= misc ========= */
+$('#genIds').addEventListener('click', ()=>{
+  $('#confId').value = uuid();
+  $('#sessId').value = uuid();
+});
+$('#saveSettings').addEventListener('click', saveSettings);
+$('#testS3').addEventListener('click', testS3);
+$('#clearLocal').addEventListener('click', ()=>{
+  images=[]; audios=[]; notes=[]; uploadedKeys.clear();
+  $('#imgGrid').innerHTML=''; $('#audioList').innerHTML='';
+  $('#noteStatus').textContent='0 notes'; updatePending();
+});
+function updatePending(){
+  const n = images.length + audios.length + notes.length;
+  $('#uploadStatus').textContent = `${n} pending`;
+}
+loadSettings(); saveSettings(); // auto-init
+</script>
+</body>
+</html>
