@@ -151,6 +151,14 @@ const b2f=(blob,name)=>new File([blob],name,{type:blob.type});
 const mimeFromName=n=>n.endsWith('.jpg')?'image/jpeg':n.endsWith('.m4a')?'audio/mp4':'text/plain';
 const log=(...a)=>{const L=$('#log');L.textContent+=a.join(' ')+'\n';L.scrollTop=L.scrollHeight}
 
+/* De-collision for timestamped names */
+let _lastTs=''; let _tsCount=0;
+function uniqTs(){
+  const t = iso();
+  if(t===_lastTs){ _tsCount++; return `${t}__${_tsCount}`; }
+  _lastTs=t; _tsCount=0; return t;
+}
+
 /* ===== In-memory session ===== */
 let images=[],audios=[],notes=[],uploadedKeys=new Set();
 let rec=null,recChunks=[];
@@ -249,7 +257,7 @@ $('#loadLocal').addEventListener('click',async ()=>{
   $('#vendorName').value=p.fields.vendorName||''; $('#location').value=p.fields.location||'';
   images=(p.images||[]).map(o=>({file:new File([o.buf],o.name,{type:o.type})}));
   audios=(p.audios||[]).map(o=>({file:new File([o.buf],o.name,{type:o.type})}));
-  notes=(p.notes||[]).map(o=>({file:new File([o.buf],o.name,{type:o.type})}));
+  notes=(p.notes ||[]).map(o=>({file:new File([o.buf],o.name,{type:o.type})}));
   $('#imgGrid').innerHTML=''; images.forEach(it=>{const el=document.createElement('img');el.className='thumb';el.src=URL.createObjectURL(it.file);$('#imgGrid').appendChild(el)});
   $('#audioList').innerHTML=''; audios.forEach(it=>{const row=document.createElement('div');row.textContent=`Audio ${Math.round(it.file.size/1024)} KB`;$('#audioList').appendChild(row)});
   $('#noteStatus').textContent=`${notes.length} notes`; $('#localStatus').textContent='loaded'; $('#localStatus').className='pill ok';
@@ -290,10 +298,15 @@ async function testAws(){
   try{
     const Key=`cbud_test_${Date.now()}.txt`;
     await new Promise((res,rej)=>{
-      cfg.s3.upload({Bucket:cfg.bucket, Key, Body:new Blob(['ok'],'text/plain'), ContentType:'text/plain'}).send((e,d)=>e?rej(e):res(d))
+      cfg.s3.upload({
+        Bucket: cfg.bucket,
+        Key,
+        Body: 'ok', // string body avoids Blob issues
+        ContentType: 'text/plain'
+      }).send((e,d)=>e?rej(e):res(d));
     });
     $('#awsStatus').textContent='connected'; $('#awsStatus').className='pill ok';
-    log('AWS test OK →', 's3://'+cfg.bucket+'/'+`cbud_test_${Date.now()}.txt`);
+    log('AWS test OK → s3://'+cfg.bucket+'/'+Key);
   }catch(e){
     $('#awsStatus').textContent='failed'; $('#awsStatus').className='pill warn';
     log('AWS test failed:', e.code||'', e.message||e);
@@ -326,7 +339,8 @@ async function uploadOne({Key,File,ContentType}, cfg){
   } else if(cfg.aws){ // AWS SDK flow
     await new Promise((res,rej)=>{
       const req=cfg.aws.s3.upload({Bucket:cfg.aws.bucket, Key, Body:File, ContentType});
-      req.on('httpUploadProgress',e=>cfg.onProgress(e.loaded/e.total)); req.send((e,d)=>e?rej(e):(uploadedKeys.add(Key),res(d)));
+      req.on('httpUploadProgress',e=>cfg.onProgress(e.loaded/e.total));
+      req.send((e,d)=>e?rej(e):(uploadedKeys.add(Key),res(d)));
     });
   } else { throw new Error('No upload method configured (save AWS settings or set Presign API).'); }
 }
@@ -337,14 +351,12 @@ $('#uploadAll').addEventListener('click', async ()=>{
     ensureAutoFields();
     const P=paths(); const conf=$('#confId').value.trim(), sid=$('#sessId').value.trim();
     const presignBase=$('#presignBase').value.trim(); const awsCfg=getAwsConfig();
-    const cfg={ presign: presignBase || null, aws: awsCfg,
-      onProgress: p=>{} };
+    const cfg={ presign: presignBase || null, aws: awsCfg, onProgress: p=>{} };
     if(!cfg.presign && !cfg.aws){ throw new Error('No upload method configured (save AWS settings or set Presign API).'); }
 
     let total=images.length+audios.length+notes.length+4; let done=0;
     const tick=()=>{ done++; const pct=Math.round(done/total*100); $('#overallBar').style.width=pct+'%'; };
 
-    const ts=()=>iso();
     const up=async(Key,File,ContentType)=>{ await uploadOne({Key,File,ContentType},{...cfg,onProgress:()=>{}}); tick(); log('Uploaded',Key); };
 
     // session scaffolding files
@@ -356,19 +368,19 @@ $('#uploadAll').addEventListener('click', async ()=>{
     let imgN=0,audN=0,noteN=0;
 
     for(const it of images){
-      const name=`${sid}__${ts()}.jpg`;
+      const name=`${sid}__${uniqTs()}.jpg`;
       await up(`${P.imageDir}${name}`, it.file, 'image/jpeg');
       await up(`${P.imageDir}${name.replace(/\.jpg$/,'.meta.txt')}`, new Blob([meta('image',name)],{type:'text/plain'}),'text/plain');
       imgN++;
     }
     for(const it of audios){
-      const name=`${sid}__${ts()}.m4a`;
+      const name=`${sid}__${uniqTs()}.m4a`;
       await up(`${P.audioDir}${name}`, it.file, 'audio/mp4');
       await up(`${P.audioDir}${name.replace(/\.m4a$/,'.meta.txt')}`, new Blob([meta('audio',name)],{type:'text/plain'}),'text/plain');
       audN++;
     }
     for(const it of notes){
-      const name=`${sid}__${ts()}.txt`;
+      const name=`${sid}__${uniqTs()}.txt`;
       await up(`${P.notesDir}${name}`, it.file, 'text/plain');
       await up(`${P.notesDir}${name.replace(/\.txt$/,'.meta.txt')}`, new Blob([meta('note',name)],{type:'text/plain'}),'text/plain');
       noteN++;
@@ -391,9 +403,7 @@ function updatePending(){ const n=images.length+audios.length+notes.length; $('#
 
 /* ===== Boot ===== */
 (function boot(){
-  // Load saved AWS settings (if any)
   loadAwsSettings();
-  // Pre-fill defaults for region/bucket if empty
   if(!$('#region').value) $('#region').value='eu-west-2';
   if(!$('#bucket').value) $('#bucket').value='confbud';
   updatePending();
