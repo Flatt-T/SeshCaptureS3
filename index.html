@@ -27,12 +27,11 @@
   .stop{background:#16a34a;border:0}
   .imgbtn{background:#2563eb;border:0}
   .uploadbtn{background:#16a34a;border:0}
-  .disabled{opacity:.6;pointer-events:none}
   .progress{height:10px;background:#0b1220;border:1px solid var(--border);border-radius:999px;overflow:hidden}
   .bar{height:100%;background:#22c55e;width:0%}
   small{color:var(--muted)}
 </style>
-<!-- Optional AWS SDK (only used if user provides credentials) -->
+<!-- Optional AWS SDK (used only if you paste creds) -->
 <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1481.0.min.js"></script>
 </head>
 <body>
@@ -93,13 +92,12 @@
       <div>
         <label>Presign API base (optional)</label>
         <input id="presignBase" placeholder="https://api.example.com/presign" />
-        <small>Should accept: POST { key, contentType } → { url }</small>
+        <small>POST { key, contentType } → { url }</small>
       </div>
       <div>
         <label>S3 Region · Bucket</label>
         <input id="region" placeholder="eu-west-2" />
         <input id="bucket" placeholder="confbud" style="margin-top:8px" />
-        <small>Needed if you paste AWS creds below. Leave blank for presigned flow.</small>
       </div>
     </div>
     <div class="row">
@@ -111,6 +109,11 @@
         <label>AWS Secret (optional)</label>
         <input id="sk" placeholder="••••" />
       </div>
+    </div>
+    <div class="toolbar" style="margin-top:10px">
+      <button id="saveAws" class="bigbtn">💾 Save AWS Settings</button>
+      <button id="testAws" class="bigbtn">🔌 Test AWS</button>
+      <span id="awsStatus" class="pill">not configured</span>
     </div>
     <div class="toolbar" style="margin-top:10px">
       <button id="uploadAll" class="uploadbtn bigbtn">⬆️ Upload Session</button>
@@ -133,43 +136,35 @@
 </div>
 
 <script>
-/* ============ Minimal IndexedDB (no deps) ============ */
+/* ===== IndexedDB for local drafts ===== */
 const DB_NAME='cbud_db', STORE='draft';
-function idbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAME,1); r.onupgradeneeded=()=>r.result.createObjectStore(STORE); r.onerror=()=>rej(r.error); r.onsuccess=()=>res(r.result); });}
-async function idbPut(key,val){ const db=await idbOpen(); return new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readwrite'); tx.objectStore(STORE).put(val,key); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
-async function idbGet(key){ const db=await idbOpen(); return new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readonly'); const req=tx.objectStore(STORE).get(key); req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); });}
-async function idbDel(key){ const db=await idbOpen(); return new Promise((res,rej)=>{ const tx=db.transaction(STORE,'readwrite'); tx.objectStore(STORE).delete(key); tx.oncomplete=()=>res(); tx.onerror=()=>rej(tx.error); });}
+function idbOpen(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,1);r.onupgradeneeded=()=>r.result.createObjectStore(STORE);r.onerror=()=>rej(r.error);r.onsuccess=()=>res(r.result)})}
+async function idbPut(k,v){const db=await idbOpen();return new Promise((res,rej)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).put(v,k);tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error)})}
+async function idbGet(k){const db=await idbOpen();return new Promise((res,rej)=>{const tx=db.transaction(STORE,'readonly');const req=tx.objectStore(STORE).get(k);req.onsuccess=()=>res(req.result);req.onerror=()=>rej(req.error)})}
+async function idbDel(k){const db=await idbOpen();return new Promise((res,rej)=>{const tx=db.transaction(STORE,'readwrite');tx.objectStore(STORE).delete(k);tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error)})}
 
-/* ============ Utilities ============ */
-const $ = s=>document.querySelector(s);
-const iso = t=>new Date(t||Date.now()).toISOString().replace(/:/g,'-');
-const uuid = ()=> (crypto.randomUUID ? crypto.randomUUID()
-  : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)}));
-const b2f = (blob,name)=> new File([blob], name, {type: blob.type});
-const mimeFromName = n => n.endsWith('.jpg')?'image/jpeg':n.endsWith('.m4a')?'audio/mp4':'text/plain';
-const log = (...a)=>{ const L=$('#log'); L.textContent += a.join(' ') + '\n'; L.scrollTop=L.scrollHeight; }
+/* ===== Utilities ===== */
+const $=s=>document.querySelector(s);
+const iso=t=>new Date(t||Date.now()).toISOString().replace(/:/g,'-');
+const uuid=()=>crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)});
+const b2f=(blob,name)=>new File([blob],name,{type:blob.type});
+const mimeFromName=n=>n.endsWith('.jpg')?'image/jpeg':n.endsWith('.m4a')?'audio/mp4':'text/plain';
+const log=(...a)=>{const L=$('#log');L.textContent+=a.join(' ')+'\n';L.scrollTop=L.scrollHeight}
 
-/* ============ In-memory session ============ */
-let images=[];   // [{file}]
-let audios=[];   // [{file}]
-let notes=[];    // [{file, body}]
-let uploadedKeys=new Set();
-let rec=null, recChunks=[];
+/* ===== In-memory session ===== */
+let images=[],audios=[],notes=[],uploadedKeys=new Set();
+let rec=null,recChunks=[];
 
-/* ============ Session helpers ============ */
+/* ===== Session helpers ===== */
 function ensureAutoFields(){
-  if(!$('#confId').value.trim()) $('#confId').value = uuid();
-  if(!$('#sessId').value.trim()) $('#sessId').value = uuid();
-  const today = new Date().toISOString().slice(0,10);
-  if(!$('#confName').value.trim()) $('#confName').value = `Conference ${today}`;
-  if(!$('#sessName').value.trim()){
-    const t = new Date().toTimeString().split(' ')[0];
-    $('#sessName').value = `Session ${t}`;
-  }
+  if(!$('#confId').value.trim()) $('#confId').value=uuid();
+  if(!$('#sessId').value.trim()) $('#sessId').value=uuid();
+  const today=new Date().toISOString().slice(0,10);
+  if(!$('#confName').value.trim()) $('#confName').value=`Conference ${today}`;
+  if(!$('#sessName').value.trim()){const t=new Date().toTimeString().split(' ')[0];$('#sessName').value=`Session ${t}`}
 }
 function paths(){
-  const conf=$('#confId').value.trim(), sid=$('#sessId').value.trim();
-  const base=`conferences/${conf}`;
+  const conf=$('#confId').value.trim(),sid=$('#sessId').value.trim(),base=`conferences/${conf}`;
   return {
     reports:`${base}/reports/`,
     sessDir:`${base}/sessions/${sid}/`,
@@ -179,7 +174,7 @@ function paths(){
     audioDir:`${base}/audio/`,
     imageDir:`${base}/images/`,
     notesDir:`${base}/notes/`
-  };
+  }
 }
 function sessionTxt(){
   return [
@@ -190,7 +185,7 @@ function sessionTxt(){
     `vendor_name: ${$('#vendorName').value.trim()}`,
     `started_at: ${new Date().toISOString()}`,
     `location: ${$('#location').value.trim()}`
-  ].join('\n');
+  ].join('\n')
 }
 function meta(kind,name){
   return [
@@ -202,151 +197,155 @@ function meta(kind,name){
     `created_at: ${new Date().toISOString()}`,
     `app_version: 1`,
     `mime: ${mimeFromName(name)}`
-  ].join('\n');
+  ].join('\n')
 }
 
-/* ============ Capture wiring ============ */
-$('#imgPickBtn').addEventListener('click', ()=>$('#imgPick').click());
-$('#imgPick').addEventListener('change', (e)=>{
-  const files=[...e.target.files]; const grid=$('#imgGrid');
-  files.forEach(f=>{ images.push({file:f}); const el=document.createElement('img'); el.className='thumb'; el.src=URL.createObjectURL(f); grid.appendChild(el); });
+/* ===== Capture wiring ===== */
+$('#imgPickBtn').addEventListener('click',()=>$('#imgPick').click());
+$('#imgPick').addEventListener('change',e=>{
+  const files=[...e.target.files],grid=$('#imgGrid');
+  files.forEach(f=>{images.push({file:f});const el=document.createElement('img');el.className='thumb';el.src=URL.createObjectURL(f);grid.appendChild(el)});
   updatePending();
 });
-
-$('#recToggle').addEventListener('click', async ()=>{
+$('#recToggle').addEventListener('click',async ()=>{
   try{
     if(!rec){
-      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-      rec = new MediaRecorder(stream);
-      rec.ondataavailable = e=> recChunks.push(e.data);
-      rec.onstop = ()=>{
-        const blob = new Blob(recChunks, {type:'audio/mp4'}); recChunks=[];
-        const f = b2f(blob, 'audio_tmp.m4a');
-        audios.push({file:f});
-        const row=document.createElement('div'); row.textContent=`Audio ${Math.round(f.size/1024)} KB @ ${new Date().toLocaleTimeString()}`;
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      rec=new MediaRecorder(stream);
+      rec.ondataavailable=e=>recChunks.push(e.data);
+      rec.onstop=()=>{
+        const blob=new Blob(recChunks,{type:'audio/mp4'});recChunks=[];
+        const f=b2f(blob,'audio_tmp.m4a'); audios.push({file:f});
+        const row=document.createElement('div');row.textContent=`Audio ${Math.round(f.size/1024)} KB @ ${new Date().toLocaleTimeString()}`;
         $('#audioList').appendChild(row);
-        $('#recToggle').classList.remove('stop'); $('#recToggle').classList.add('record');
-        $('#recToggle').textContent='● Start Recording'; $('#recStatus').textContent='stopped';
+        $('#recToggle').classList.remove('stop');$('#recToggle').classList.add('record');
+        $('#recToggle').textContent='● Start Recording';$('#recStatus').textContent='stopped';
         updatePending();
       };
-      rec.start(); $('#recStatus').textContent='recording...';
-      $('#recToggle').classList.remove('record'); $('#recToggle').classList.add('stop');
+      rec.start();$('#recStatus').textContent='recording...';
+      $('#recToggle').classList.remove('record');$('#recToggle').classList.add('stop');
       $('#recToggle').textContent='■ Stop Recording';
-    } else {
-      rec.stop(); rec=null;
-    }
+    } else { rec.stop();rec=null; }
   }catch(e){ alert('Microphone error: '+(e.message||e)); }
 });
-
-$('#addNote').addEventListener('click', ()=>{
+$('#addNote').addEventListener('click',()=>{
   const body=$('#noteText').value.trim(); if(!body) return;
   const blob=new Blob([body],{type:'text/plain'}); const f=b2f(blob,'note_tmp.txt');
-  notes.push({file:f, body}); $('#noteText').value=''; $('#noteStatus').textContent=`${notes.length} notes`; updatePending();
+  notes.push({file:f,body}); $('#noteText').value=''; $('#noteStatus').textContent=`${notes.length} notes`; updatePending();
 });
 
-/* ============ Local Save/Load ============ */
-$('#saveLocal').addEventListener('click', async ()=>{
-  const payload = {
-    v:1,
-    fields:{
-      confId:$('#confId').value, sessId:$('#sessId').value,
-      confName:$('#confName').value, sessName:$('#sessName').value,
-      vendorName:$('#vendorName').value, location:$('#location').value
-    },
-    images: await Promise.all(images.map(async it=>({name:it.file.name, type:it.file.type, buf:await it.file.arrayBuffer()}))),
-    audios: await Promise.all(audios.map(async it=>({name:it.file.name, type:it.file.type, buf:await it.file.arrayBuffer()}))),
-    notes:  await Promise.all(notes.map(async it=>({name:it.file.name, type:it.file.type, buf:await it.file.arrayBuffer()})))
-  };
-  await idbPut('draft', payload);
-  $('#localStatus').textContent='saved'; $('#localStatus').className='pill ok';
+/* ===== Local Save/Load ===== */
+$('#saveLocal').addEventListener('click',async ()=>{
+  const payload={v:1,fields:{confId:$('#confId').value,sessId:$('#sessId').value,confName:$('#confName').value,sessName:$('#sessName').value,vendorName:$('#vendorName').value,location:$('#location').value},
+    images:await Promise.all(images.map(async it=>({name:it.file.name,type:it.file.type,buf:await it.file.arrayBuffer()}))),
+    audios:await Promise.all(audios.map(async it=>({name:it.file.name,type:it.file.type,buf:await it.file.arrayBuffer()}))),
+    notes:await Promise.all(notes.map(async it=>({name:it.file.name,type:it.file.type,buf:await it.file.arrayBuffer()})))};
+  await idbPut('draft',payload); $('#localStatus').textContent='saved'; $('#localStatus').className='pill ok';
 });
-$('#loadLocal').addEventListener('click', async ()=>{
-  const p = await idbGet('draft'); if(!p){ alert('No draft saved.'); return; }
+$('#loadLocal').addEventListener('click',async ()=>{
+  const p=await idbGet('draft'); if(!p){alert('No draft saved.');return;}
   $('#confId').value=p.fields.confId||''; $('#sessId').value=p.fields.sessId||'';
   $('#confName').value=p.fields.confName||''; $('#sessName').value=p.fields.sessName||'';
   $('#vendorName').value=p.fields.vendorName||''; $('#location').value=p.fields.location||'';
-  images = (p.images||[]).map(o=>({file:new File([o.buf], o.name, {type:o.type})}));
-  audios = (p.audios||[]).map(o=>({file:new File([o.buf], o.name, {type:o.type})}));
-  notes  = (p.notes ||[]).map(o=>({file:new File([o.buf], o.name, {type:o.type})}));
-  $('#imgGrid').innerHTML=''; images.forEach(it=>{ const el=document.createElement('img'); el.className='thumb'; el.src=URL.createObjectURL(it.file); $('#imgGrid').appendChild(el); });
-  $('#audioList').innerHTML=''; audios.forEach(it=>{ const row=document.createElement('div'); row.textContent=`Audio ${Math.round(it.file.size/1024)} KB`; $('#audioList').appendChild(row);});
-  $('#noteStatus').textContent=`${notes.length} notes`;
-  $('#localStatus').textContent='loaded'; $('#localStatus').className='pill ok';
+  images=(p.images||[]).map(o=>({file:new File([o.buf],o.name,{type:o.type})}));
+  audios=(p.audios||[]).map(o=>({file:new File([o.buf],o.name,{type:o.type})}));
+  notes=(p.notes||[]).map(o=>({file:new File([o.buf],o.name,{type:o.type})}));
+  $('#imgGrid').innerHTML=''; images.forEach(it=>{const el=document.createElement('img');el.className='thumb';el.src=URL.createObjectURL(it.file);$('#imgGrid').appendChild(el)});
+  $('#audioList').innerHTML=''; audios.forEach(it=>{const row=document.createElement('div');row.textContent=`Audio ${Math.round(it.file.size/1024)} KB`;$('#audioList').appendChild(row)});
+  $('#noteStatus').textContent=`${notes.length} notes`; $('#localStatus').textContent='loaded'; $('#localStatus').className='pill ok';
   updatePending();
 });
-$('#clearLocal').addEventListener('click', async ()=>{
-  images=[]; audios=[]; notes=[]; uploadedKeys.clear();
+$('#clearLocal').addEventListener('click',async ()=>{
+  images=[];audios=[];notes=[];uploadedKeys.clear();
   $('#imgGrid').innerHTML=''; $('#audioList').innerHTML='';
   $('#noteStatus').textContent='0 notes'; await idbDel('draft');
-  $('#localStatus').textContent='cleared'; $('#localStatus').className='pill';
-  updatePending();
+  $('#localStatus').textContent='cleared'; $('#localStatus').className='pill'; updatePending();
 });
 
-/* ============ Upload plumbing (presigned or AWS SDK) ============ */
-function useAwsSdk(){
-  const ak=$('#ak').value.trim(), sk=$('#sk').value.trim(), region=$('#region').value.trim(), bucket=$('#bucket').value.trim();
-  if(!ak || !sk || !region || !bucket) return null;
-  AWS.config.update({region, credentials:new AWS.Credentials(ak, sk)});
-  return new AWS.S3({apiVersion:'2006-03-01', params:{Bucket:bucket}});
+/* ===== AWS settings (save + test) ===== */
+function loadAwsSettings(){
+  try{const s=JSON.parse(localStorage.cbud_aws||'{}');
+    $('#region').value=s.region||'eu-west-2';
+    $('#bucket').value=s.bucket||'confbud';
+    $('#ak').value=s.ak||'';
+    $('#sk').value=s.sk||'';
+    if(s.ak && s.sk) { $('#awsStatus').textContent='loaded'; $('#awsStatus').className='pill ok'; }
+    else { $('#awsStatus').textContent='not configured'; $('#awsStatus').className='pill'; }
+  }catch{ $('#region').value='eu-west-2'; $('#bucket').value='confbud'; }
 }
-async function presignPut(url, file, onProgress){
+function saveAwsSettings(){
+  const s={region:$('#region').value.trim()||'eu-west-2',bucket:$('#bucket').value.trim()||'confbud',ak:$('#ak').value.trim(),sk:$('#sk').value.trim()};
+  localStorage.cbud_aws=JSON.stringify(s);
+  $('#awsStatus').textContent='saved'; $('#awsStatus').className='pill ok';
+}
+function getAwsConfig(){
+  const s=JSON.parse(localStorage.cbud_aws||'{}');
+  if(!(s.ak && s.sk && s.region && s.bucket)) return null;
+  AWS.config.update({region:s.region, credentials:new AWS.Credentials(s.ak, s.sk)});
+  return { s3: new AWS.S3({apiVersion:'2006-03-01', params:{Bucket:s.bucket}}), bucket:s.bucket };
+}
+async function testAws(){
+  const cfg=getAwsConfig();
+  if(!cfg){ $('#awsStatus').textContent='missing values'; $('#awsStatus').className='pill warn'; return; }
+  try{
+    const Key=`cbud_test_${Date.now()}.txt`;
+    await new Promise((res,rej)=>{
+      cfg.s3.upload({Bucket:cfg.bucket, Key, Body:new Blob(['ok'],'text/plain'), ContentType:'text/plain'}).send((e,d)=>e?rej(e):res(d))
+    });
+    $('#awsStatus').textContent='connected'; $('#awsStatus').className='pill ok';
+    log('AWS test OK →', 's3://'+cfg.bucket+'/'+`cbud_test_${Date.now()}.txt`);
+  }catch(e){
+    $('#awsStatus').textContent='failed'; $('#awsStatus').className='pill warn';
+    log('AWS test failed:', e.code||'', e.message||e);
+  }
+}
+$('#saveAws').addEventListener('click', saveAwsSettings);
+$('#testAws').addEventListener('click', testAws);
+
+/* ===== Upload (presigned preferred, else AWS SDK) ===== */
+async function getPresignedUrl(base,key,contentType){
+  const r=await fetch(base,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,contentType})});
+  if(!r.ok) throw new Error('presign failed'); const j=await r.json();
+  return j.url||j.signedUrl||j.presignedUrl;
+}
+async function putPresigned(url,file,onProgress){
   return new Promise((res,rej)=>{
-    const xhr=new XMLHttpRequest(); xhr.open('PUT', url, true);
-    xhr.upload.onprogress = e=>{ if(e.lengthComputable){ onProgress(e.loaded/e.total); } };
-    xhr.onload = ()=> xhr.status>=200&&xhr.status<300 ? res() : rej(new Error('HTTP '+xhr.status));
+    const xhr=new XMLHttpRequest(); xhr.open('PUT',url,true);
+    xhr.upload.onprogress=e=>{ if(e.lengthComputable) onProgress(e.loaded/e.total) };
+    xhr.onload=()=>xhr.status>=200&&xhr.status<300?res():rej(new Error('HTTP '+xhr.status));
     xhr.onerror=()=>rej(new Error('Network'));
-    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.setRequestHeader('Content-Type', file.type||'application/octet-stream');
     xhr.send(file);
   });
 }
-async function getPresignedUrl(base, key, contentType){
-  const r = await fetch(base, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({key, contentType})});
-  if(!r.ok) throw new Error('presign failed');
-  const j = await r.json();
-  return j.url || j.signedUrl || j.presignedUrl;
-}
-async function uploadOne({Key, File, ContentType}, cfg){
-  // prefer AWS SDK if configured; else presigned
-  if(cfg.s3){
-    return new Promise((res,rej)=>{
-      const req = cfg.s3.upload({Bucket:cfg.bucket, Key, Body:File, ContentType});
-      req.on('httpUploadProgress', e=> cfg.onProgress(e.loaded/e.total));
-      req.send((err,data)=> err?rej(err):(uploadedKeys.add(Key),res(data)));
-    });
-  } else if(cfg.presignBase){
-    const url = await getPresignedUrl(cfg.presignBase, Key, ContentType);
-    await presignPut(url, File, cfg.onProgress);
+async function uploadOne({Key,File,ContentType}, cfg){
+  if(cfg.presign){ // presigned flow
+    const url=await getPresignedUrl(cfg.presign,Key,ContentType);
+    await putPresigned(url,File,cfg.onProgress);
     uploadedKeys.add(Key);
-  } else {
-    throw new Error('No upload method configured (paste AWS creds or set Presign API).');
-  }
+  } else if(cfg.aws){ // AWS SDK flow
+    await new Promise((res,rej)=>{
+      const req=cfg.aws.s3.upload({Bucket:cfg.aws.bucket, Key, Body:File, ContentType});
+      req.on('httpUploadProgress',e=>cfg.onProgress(e.loaded/e.total)); req.send((e,d)=>e?rej(e):(uploadedKeys.add(Key),res(d)));
+    });
+  } else { throw new Error('No upload method configured (save AWS settings or set Presign API).'); }
 }
 
-/* ============ Upload runner ============ */
+/* ===== Upload runner ===== */
 $('#uploadAll').addEventListener('click', async ()=>{
   try{
     ensureAutoFields();
-    const P = paths();
-    const conf=$('#confId').value.trim(); const sid=$('#sessId').value.trim();
+    const P=paths(); const conf=$('#confId').value.trim(), sid=$('#sessId').value.trim();
+    const presignBase=$('#presignBase').value.trim(); const awsCfg=getAwsConfig();
+    const cfg={ presign: presignBase || null, aws: awsCfg,
+      onProgress: p=>{} };
+    if(!cfg.presign && !cfg.aws){ throw new Error('No upload method configured (save AWS settings or set Presign API).'); }
 
-    // Build config
-    const s3 = useAwsSdk(); const cfg = {
-      s3, bucket: $('#bucket').value.trim(),
-      presignBase: $('#presignBase').value.trim(),
-      onProgress: p => { /* per-file prog; aggregated below */ }
-    };
-    let total = images.length + audios.length + notes.length + 4; // +4 meta/session files
-    let done = 0;
-    const tick = () => { done++; const pct=Math.round(done/total*100); $('#overallBar').style.width=pct+'%'; };
+    let total=images.length+audios.length+notes.length+4; let done=0;
+    const tick=()=>{ done++; const pct=Math.round(done/total*100); $('#overallBar').style.width=pct+'%'; };
 
-    const ts = ()=> iso();
-    // helper wrapper that updates overall progress
-    const up = async (Key, File, ContentType)=>{
-      let localProg=0;
-      await uploadOne({Key, File, ContentType}, {...cfg, onProgress:(p)=>{ if(p>localProg){ localProg=p; } }});
-      tick();
-      log('Uploaded', Key);
-    };
+    const ts=()=>iso();
+    const up=async(Key,File,ContentType)=>{ await uploadOne({Key,File,ContentType},{...cfg,onProgress:()=>{}}); tick(); log('Uploaded',Key); };
 
     // session scaffolding files
     await up(`${P.reports}.keep`, new Blob([''],{type:'text/plain'}), 'text/plain');
@@ -356,32 +355,28 @@ $('#uploadAll').addEventListener('click', async ()=>{
 
     let imgN=0,audN=0,noteN=0;
 
-    // IMAGES
     for(const it of images){
-      const name = `${sid}__${ts()}.jpg`;
+      const name=`${sid}__${ts()}.jpg`;
       await up(`${P.imageDir}${name}`, it.file, 'image/jpeg');
-      await up(`${P.imageDir}${name.replace(/\.jpg$/,'.meta.txt')}`, new Blob([meta('image', name)],{type:'text/plain'}),'text/plain');
+      await up(`${P.imageDir}${name.replace(/\.jpg$/,'.meta.txt')}`, new Blob([meta('image',name)],{type:'text/plain'}),'text/plain');
       imgN++;
     }
-    // AUDIO
     for(const it of audios){
-      const name = `${sid}__${ts()}.m4a`;
+      const name=`${sid}__${ts()}.m4a`;
       await up(`${P.audioDir}${name}`, it.file, 'audio/mp4');
-      await up(`${P.audioDir}${name.replace(/\.m4a$/,'.meta.txt')}`, new Blob([meta('audio', name)],{type:'text/plain'}),'text/plain');
+      await up(`${P.audioDir}${name.replace(/\.m4a$/,'.meta.txt')}`, new Blob([meta('audio',name)],{type:'text/plain'}),'text/plain');
       audN++;
     }
-    // NOTES
     for(const it of notes){
-      const name = `${sid}__${ts()}.txt`;
+      const name=`${sid}__${ts()}.txt`;
       await up(`${P.notesDir}${name}`, it.file, 'text/plain');
-      await up(`${P.notesDir}${name.replace(/\.txt$/,'.meta.txt')}`, new Blob([meta('note', name)],{type:'text/plain'}),'text/plain');
+      await up(`${P.notesDir}${name.replace(/\.txt$/,'.meta.txt')}`, new Blob([meta('note',name)],{type:'text/plain'}),'text/plain');
       noteN++;
     }
 
-    // Update rollup & index at end
     const rollup=[`counts: {images:${imgN}, audio:${audN}, notes:${noteN}}`, sessionTxt()].join('\n');
     await up(P.rollupTxt, new Blob([rollup],{type:'text/plain'}),'text/plain');
-    const indexText = Array.from(uploadedKeys).filter(k=>k.startsWith(`conferences/${conf}/`)).join('\n');
+    const indexText=Array.from(uploadedKeys).filter(k=>k.startsWith(`conferences/${conf}/`)).join('\n');
     await up(P.indexTxt, new Blob([indexText],{type:'text/plain'}),'text/plain');
 
     $('#uploadHint').textContent=`Uploaded ${imgN+audN+noteN} items`; $('#uploadHint').className='pill ok';
@@ -391,14 +386,16 @@ $('#uploadAll').addEventListener('click', async ()=>{
   }
 });
 
-/* ============ small helpers ============ */
-function updatePending(){
-  const n=images.length+audios.length+notes.length;
-  $('#uploadHint').textContent = `${n} items pending`;
-}
+/* ===== Misc helpers ===== */
+function updatePending(){ const n=images.length+audios.length+notes.length; $('#uploadHint').textContent=`${n} items pending`; }
 
-/* ============ Boot ============ */
+/* ===== Boot ===== */
 (function boot(){
+  // Load saved AWS settings (if any)
+  loadAwsSettings();
+  // Pre-fill defaults for region/bucket if empty
+  if(!$('#region').value) $('#region').value='eu-west-2';
+  if(!$('#bucket').value) $('#bucket').value='confbud';
   updatePending();
 })();
 </script>
