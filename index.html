@@ -34,9 +34,13 @@
   .hidden{display:none}
   .details{color:#cbd5e1}
   .details b{color:#e5e7eb}
-  /* Settings drawer */
+  .list{display:grid;gap:8px}
+  .item{padding:10px;border:1px solid var(--border);border-radius:10px;background:#0d1426;cursor:pointer}
+  /* Drawers */
   .drawer{position:fixed;inset:0;background:#0008;display:none;align-items:flex-end;justify-content:flex-end}
   .sheet{width:420px;max-width:100%;background:var(--card);border-left:1px solid var(--border);height:100%;padding:16px;overflow:auto}
+  .bdrawer{position:fixed;inset:0;background:#0008;display:none;align-items:flex-end;justify-content:center}
+  .bsheet{width:100%;max-width:1000px;background:var(--card);border-top:1px solid var(--border);border-radius:14px 14px 0 0;padding:16px;max-height:85vh;overflow:auto}
 </style>
 <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1481.0.min.js"></script>
 </head>
@@ -90,7 +94,8 @@
     <div class="toolbar" style="margin-top:8px">
       <button id="startStop" class="bigbtn primary" style="flex:1">● Start Session (rec)</button>
       <button id="addImagesBtn" class="bigbtn blue" style="flex:1">📷 Add Image(s)</button>
-      <input id="imgPick" type="file" accept="image/*" capture="environment" multiple class="hidden">
+      <!-- Gallery picker (no capture attr to favor gallery) -->
+      <input id="imgPick" type="file" accept="image/*" multiple class="hidden">
     </div>
     <div class="pill" id="recStatus">not recording</div>
   </div>
@@ -133,9 +138,15 @@
       <div><b>IDs (hidden):</b> <span id="dIds" style="opacity:.6"></span></div>
     </div>
   </div>
+
+  <!-- RECENT SESSIONS -->
+  <div class="card">
+    <h2>Recent Sessions</h2>
+    <div id="recentList" class="list"></div>
+  </div>
 </div>
 
-<!-- SETTINGS DRAWER -->
+<!-- SETTINGS DRAWER (right) -->
 <div id="drawer" class="drawer">
   <div class="sheet">
     <div class="topbar" style="margin-bottom:10px">
@@ -153,12 +164,41 @@
       <button id="testAws" class="bigbtn">🔌 Test</button>
       <span id="awsStatus" class="pill">not configured</span>
     </div>
-    <small>Keys are stored in your browser only (localStorage). You need bucket CORS to allow your site origin for GET/PUT/HEAD.</small>
+    <small>Keys are stored in your browser only (localStorage). Configure S3 CORS for your site origin.</small>
+  </div>
+</div>
+
+<!-- HISTORY BOTTOM DRAWER -->
+<div id="historyDrawer" class="bdrawer">
+  <div class="bsheet">
+    <div class="topbar" style="margin-bottom:10px">
+      <h2 id="histTitle">Session</h2>
+      <button id="closeHistory" class="iconbtn">✖</button>
+    </div>
+    <div id="histMeta" class="mono" style="white-space:pre-wrap;color:#cbd5e1;margin-bottom:10px"></div>
+
+    <div class="card" style="margin:0 0 10px 0">
+      <h2>Add More Content</h2>
+      <div class="toolbar" style="margin-bottom:8px">
+        <button id="histRecord" class="bigbtn primary" style="flex:1">● Record Clip</button>
+        <button id="histAddImages" class="bigbtn blue" style="flex:1">📷 Add Image(s)</button>
+        <input id="histImgPick" type="file" accept="image/*" multiple class="hidden">
+      </div>
+      <label>Additional Notes</label>
+      <textarea id="histNote" placeholder="Add notes to this session…"></textarea>
+      <div class="toolbar" style="margin-top:8px">
+        <button id="histAddNote" class="iconbtn">Add Note</button>
+        <span id="histCounts" class="pill">0 new items</span>
+        <button id="histUpload" class="bigbtn primary" style="margin-left:auto">⬆️ Upload to Session</button>
+      </div>
+      <div id="histGrid" class="grid" style="margin-top:8px"></div>
+      <div id="histAudioList" class="mono" style="margin-top:8px;color:#cbd5e1"></div>
+    </div>
   </div>
 </div>
 
 <script>
-/* ===== Utilities ===== */
+/* ================= Utilities ================= */
 const $=s=>document.querySelector(s);
 const iso=t=>new Date(t||Date.now()).toISOString().replace(/:/g,'-');
 const uuid=()=>crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)});
@@ -166,78 +206,64 @@ const b2f=(blob,name)=>new File([blob],name,{type:blob.type});
 const log=(...a)=>{const L=$('#log');L.textContent+=a.join(' ')+'\n';L.scrollTop=L.scrollHeight}
 const setStatus = (t, cls='pill')=>{ const el=$('#status'); el.textContent=t; el.className=cls; }
 const mimeFromName=n=>n.endsWith('.jpg')?'image/jpeg':n.endsWith('.m4a')?'audio/mp4':'text/plain';
+let _lastTs=''; let _tsCount=0; const uniqTs=()=>{const t=iso(); if(t===_lastTs){_tsCount++;return `${t}__${_tsCount}`;} _lastTs=t; _tsCount=0; return t;};
 
-/* De-collision for timestamped names */
-let _lastTs=''; let _tsCount=0;
-function uniqTs(){ const t=iso(); if(t===_lastTs){_tsCount++; return `${t}__${_tsCount}`;} _lastTs=t; _tsCount=0; return t; }
-
-/* ===== In-memory session ===== */
+/* ================= State ================= */
 let state={
-  conferences:[], vendorsByConf:{}, sessionsByConf:{}, // from manifests
+  conferences:[], vendorsByConf:{}, sessionsByConf:{},
   confId:'', vendorId:'', sessId:'',
-  confName:'', vendorName:'', sessName:'', location:'',
   recording:false, rec:null, recChunks:[],
-  images:[], audios:[], notes:[], uploadedKeys:new Set()
+  images:[], audios:[], notes:[], uploadedKeys:new Set(),
+  // history drawer temp
+  hist:{ sessId:'', confId:'', images:[], audios:[], notes:[], rec:null, recChunks:[] }
 };
 
-/* ===== AWS settings ===== */
-function loadAws(){
-  try{const s=JSON.parse(localStorage.cbud_aws||'{}');
-    $('#region').value=s.region||'eu-west-2'; $('#bucket').value=s.bucket||'confbud'; $('#ak').value=s.ak||''; $('#sk').value=s.sk||'';
-    if(s.ak&&s.sk){ $('#awsStatus').textContent='loaded'; $('#awsStatus').className='pill ok'; } else { $('#awsStatus').textContent='not configured'; $('#awsStatus').className='pill'; }
-  }catch{ $('#region').value='eu-west-2'; $('#bucket').value='confbud'; }
-}
-function saveAws(){
-  const s={region:$('#region').value.trim()||'eu-west-2',bucket:$('#bucket').value.trim()||'confbud',ak:$('#ak').value.trim(),sk:$('#sk').value.trim()};
-  localStorage.cbud_aws=JSON.stringify(s); $('#awsStatus').textContent='saved'; $('#awsStatus').className='pill ok';
-}
-function getAws(){
-  const s=JSON.parse(localStorage.cbud_aws||'{}'); if(!(s.ak&&s.sk&&s.region&&s.bucket)) return null;
-  AWS.config.update({region:s.region, credentials:new AWS.Credentials(s.ak,s.sk)});
-  return { s3:new AWS.S3({apiVersion:'2006-03-01',params:{Bucket:s.bucket}}), bucket:s.bucket, region:s.region };
-}
-async function testAws(){
-  const cfg=getAws(); if(!cfg){$('#awsStatus').textContent='missing';$('#awsStatus').className='pill warn';return;}
-  try{
-    const Key=`cbud_test_${Date.now()}.txt`;
+/* ================= AWS config ================= */
+function loadAws(){ try{const s=JSON.parse(localStorage.cbud_aws||'{}');
+  $('#region').value=s.region||'eu-west-2'; $('#bucket').value=s.bucket||'confbud'; $('#ak').value=s.ak||''; $('#sk').value=s.sk||'';
+  if(s.ak&&s.sk){ $('#awsStatus').textContent='loaded'; $('#awsStatus').className='pill ok'; } else { $('#awsStatus').textContent='not configured'; $('#awsStatus').className='pill'; }
+}catch{ $('#region').value='eu-west-2'; $('#bucket').value='confbud'; }}
+function saveAws(){ const s={region:$('#region').value.trim()||'eu-west-2',bucket:$('#bucket').value.trim()||'confbud',ak:$('#ak').value.trim(),sk:$('#sk').value.trim()};
+  localStorage.cbud_aws=JSON.stringify(s); $('#awsStatus').textContent='saved'; $('#awsStatus').className='pill ok'; }
+function getAws(){ const s=JSON.parse(localStorage.cbud_aws||'{}'); if(!(s.ak&&s.sk&&s.region&&s.bucket)) return null;
+  AWS.config.update({region:s.region, credentials:new AWS.Credentials(s.ak,s.sk)}); return { s3:new AWS.S3({apiVersion:'2006-03-01',params:{Bucket:s.bucket}}), bucket:s.bucket, region:s.region }; }
+async function testAws(){ const cfg=getAws(); if(!cfg){$('#awsStatus').textContent='missing';$('#awsStatus').className='pill warn';return;}
+  try{const Key=`cbud_test_${Date.now()}.txt`;
     await new Promise((res,rej)=>cfg.s3.upload({Bucket:cfg.bucket,Key,Body:'ok',ContentType:'text/plain'}).send((e,d)=>e?rej(e):res(d)));
     $('#awsStatus').textContent='connected'; $('#awsStatus').className='pill ok'; log('AWS test OK → s3://'+cfg.bucket+'/'+Key);
-  }catch(e){ $('#awsStatus').textContent='failed'; $('#awsStatus').className='pill warn'; log('AWS test failed:', e.code||'', e.message||e); }
-}
+  }catch(e){ $('#awsStatus').textContent='failed'; $('#awsStatus').className='pill warn'; log('AWS test failed:', e.code||'', e.message||e); }}
 
-/* ===== S3 helpers (JSON + text) ===== */
+/* ================= S3 helpers ================= */
 async function s3Put(Key, Body, ContentType){ const cfg=getAws(); if(!cfg) throw new Error('No AWS config'); return new Promise((res,rej)=>cfg.s3.upload({Bucket:cfg.bucket,Key,Body,ContentType}).send((e,d)=>e?rej(e):res(d))); }
-async function s3GetText(Key){ const cfg=getAws(); if(!cfg) throw new Error('No AWS config'); try{
-  const data=await cfg.s3.getObject({Bucket:cfg.bucket,Key}).promise(); return new TextDecoder().decode(data.Body);
+async function s3GetText(Key){ const cfg=getAws(); if(!cfg) throw new Error('No AWS config'); try{ const data=await cfg.s3.getObject({Bucket:cfg.bucket,Key}).promise(); return new TextDecoder().decode(data.Body);
 }catch(e){ if(e.code==='NoSuchKey') return null; throw e; } }
 async function s3GetJson(Key){ const txt=await s3GetText(Key); return txt?JSON.parse(txt):null; }
 async function s3PutJson(Key, obj){ return s3Put(Key, new Blob([JSON.stringify(obj)],{type:'application/json'}), 'application/json'); }
 async function s3PutTxt(Key, txt){ return s3Put(Key, new Blob([txt],{type:'text/plain'}), 'text/plain'); }
 
-/* ===== Manifest keys ===== */
+/* ================= Keys / Structure ================= */
+/* (CHANGED) media inside session folder */
 const mKeys = {
   confIndex : ()=> `conferences/index.json`,
   vendors   : (confId)=> `conferences/${confId}/vendors.json`,
   sessIndex : (confId)=> `conferences/${confId}/sessions/index.json`,
-  // existing text files
+  sessDir   : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/`,
   sessionTxt: (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/session.txt`,
   rollupTxt : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/session_${sessId}.txt`,
-  sessDir   : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/`,
-  reports   : (confId)=>`conferences/${confId}/reports/`,
-  audioDir  : (confId)=>`conferences/${confId}/audio/`,
-  imageDir  : (confId)=>`conferences/${confId}/images/`,
-  notesDir  : (confId)=>`conferences/${confId}/notes/`,
   indexTxt  : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/index.txt`,
+  reports   : (confId)=>`conferences/${confId}/reports/`,
+  // media now under session:
+  audioDir  : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/audio/`,
+  imageDir  : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/images/`,
+  notesDir  : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/notes/`,
 };
 
-/* ===== Manifest load/populate UI ===== */
+/* ================= Manifests ================= */
 async function loadManifests(){
-  try{
-    const confs = await s3GetJson(mKeys.confIndex()) || { conferences:[] };
-    state.conferences = confs.conferences;
-    populateConfSelect();
-    setStatus('manifests loaded','pill ok');
-  }catch(e){ log('Load manifests failed:', e.message||e); setStatus('manifest load error','pill warn'); }
+  const confs = await s3GetJson(mKeys.confIndex()) || { conferences:[] };
+  state.conferences = confs.conferences;
+  populateConfSelect();
+  setStatus('manifests loaded','pill ok');
 }
 function populateConfSelect(){
   const sel=$('#confSelect'); sel.innerHTML='';
@@ -248,28 +274,42 @@ function populateConfSelect(){
 }
 async function onConfChange(){
   const confId=$('#confSelect').value; state.confId=confId; localStorage.cbud_last_conf=confId;
-  // load vendors & sessions
   const vendors = await s3GetJson(mKeys.vendors(confId)) || { vendors:[] };
   const sessIdx = await s3GetJson(mKeys.sessIndex(confId)) || { sessions:[] };
-  state.vendorsByConf[confId]=vendors.vendors; state.sessionsByConf[confId]=sessIdx.sessions;
-  populateVendorSelect(); populateSessSelect(); updateDetails();
+  state.vendorsByConf[confId]=vendors.vendors;
+  // sort sessions newest first
+  state.sessionsByConf[confId]=(sessIdx.sessions||[]).slice().sort((a,b)=> (b.started_at||'').localeCompare(a.started_at||''));
+  populateVendorSelect(); populateSessSelect(); updateDetails(); renderRecent();
 }
 function populateVendorSelect(){
-  const sel=$('#vendorSelect'); sel.innerHTML=''; const confId=state.confId;
+  const sel=$('#vendorSelect'); sel.innerHTML='';
   const last = localStorage.cbud_last_vendor || '';
-  const list = state.vendorsByConf[confId]||[];
+  const list = state.vendorsByConf[state.confId]||[];
   for(const v of list){ const o=document.createElement('option'); o.value=v.id; o.textContent=v.name; if(v.id===last) o.selected=true; sel.appendChild(o); }
   if(!sel.value && list[0]) sel.value=list[0].id;
   state.vendorId = sel.value || ''; state.vendorName = (list.find(v=>v.id===state.vendorId)||{}).name || '';
 }
 function populateSessSelect(){
-  const sel=$('#sessSelect'); sel.innerHTML=''; const confId=state.confId;
+  const sel=$('#sessSelect'); sel.innerHTML='';
   const last = localStorage.cbud_last_sess || '';
-  const list = (state.sessionsByConf[confId]||[]).sort((a,b)=> (b.started_at||'').localeCompare(a.started_at||''));
+  const list = state.sessionsByConf[state.confId]||[];
   for(const s of list){ const o=document.createElement('option'); o.value=s.id; o.textContent=s.name; if(s.id===last) o.selected=true; sel.appendChild(o); }
   if(!sel.value && list[0]) sel.value=list[0].id;
   state.sessId = sel.value || ''; const selObj=list.find(s=>s.id===state.sessId)||{};
-  state.sessName = selObj.name || ''; $('#location').value = selObj.location || '';
+  $('#location').value = selObj.location || '';
+  state.sessName = selObj.name || '';
+}
+function renderRecent(){
+  const box=$('#recentList'); box.innerHTML='';
+  const list = state.sessionsByConf[state.confId]||[];
+  const top = list.slice(0,8);
+  for(const s of top){
+    const item=document.createElement('div'); item.className='item';
+    const when = s.started_at ? new Date(s.started_at).toLocaleString() : '—';
+    item.innerHTML = `<b>${s.name}</b><br><small>${when}</small>`;
+    item.addEventListener('click', ()=> openHistory(s));
+    box.appendChild(item);
+  }
 }
 function updateDetails(){
   const conf = state.conferences.find(c=>c.id===state.confId)||{};
@@ -282,9 +322,8 @@ function updateDetails(){
   $('#dIds').textContent = `conf=${state.confId} · vendor=${state.vendorId} · session=${state.sessId}`;
 }
 
-/* ===== Create new Conference/Vendor/Session ===== */
+/* ================= Ensure create in manifests ================= */
 async function ensureConf(conference){
-  // conference: {id,name,start?,end?}
   const confs = await s3GetJson(mKeys.confIndex()) || { conferences:[] };
   if(!confs.conferences.find(c=>c.id===conference.id)){ confs.conferences.push(conference); await s3PutJson(mKeys.confIndex(), confs); }
 }
@@ -297,8 +336,8 @@ async function ensureSession(confId, session){
   if(!s.sessions.find(x=>x.id===session.id)){ s.sessions.push(session); await s3PutJson(mKeys.sessIndex(confId), s); }
 }
 
-/* ===== Session text + meta builders (existing .txt structure) ===== */
-function sessionTxt(confId, confName, sessId, sessName, vendorName, location){
+/* ================= Session .txt + meta ================= */
+function buildSessionTxt(confId, confName, sessId, sessName, vendorName, location){
   return [
     `conference_id: ${confId}`,
     `session_id: ${sessId}`,
@@ -322,11 +361,11 @@ function meta(kind,confId,sessId,name){
   ].join('\n');
 }
 
-/* ===== UI wiring ===== */
+/* ================= UI: settings + selectors ================= */
 $('#settingsBtn').addEventListener('click',()=>$('#drawer').style.display='flex');
 $('#closeDrawer').addEventListener('click',()=>$('#drawer').style.display='none');
-$('#saveAws').addEventListener('click',()=>{ saveAws(); });
-$('#testAws').addEventListener('click',()=>{ testAws(); });
+$('#saveAws').addEventListener('click',saveAws);
+$('#testAws').addEventListener('click',testAws);
 
 $('#confSelect').addEventListener('change', async ()=>{ await onConfChange(); updateDetails(); });
 $('#vendorSelect').addEventListener('change', ()=>{ state.vendorId=$('#vendorSelect').value; localStorage.cbud_last_vendor=state.vendorId; state.vendorName=(state.vendorsByConf[state.confId]||[]).find(v=>v.id===state.vendorId)?.name||''; updateDetails(); });
@@ -338,40 +377,33 @@ $('#newConf').addEventListener('click', async ()=>{
   await ensureConf(c); await loadManifests();
   $('#confSelect').value = c.id; await onConfChange(); updateDetails();
 });
-
 $('#newVendor').addEventListener('click', async ()=>{
   if(!state.confId){ alert('Pick a conference first'); return; }
   const name = prompt('Vendor name?'); if(!name) return;
   const v = { id: uuid(), name };
   await ensureVendor(state.confId, v);
-  await onConfChange(); // reload vendors/sessions
-  $('#vendorSelect').value = v.id; $('#vendorSelect').dispatchEvent(new Event('change'));
+  await onConfChange(); $('#vendorSelect').value = v.id; $('#vendorSelect').dispatchEvent(new Event('change'));
 });
-
 $('#newSess').addEventListener('click', async ()=>{
   if(!state.confId){ alert('Pick a conference first'); return; }
   const name = prompt('Session name?'); if(!name) return;
   const s = { id: uuid(), name, vendor_id: $('#vendorSelect').value || '', started_at: new Date().toISOString(), location: $('#location').value||'' };
   await ensureSession(state.confId, s);
-  await onConfChange(); // refresh lists
-  $('#sessSelect').value = s.id; $('#sessSelect').dispatchEvent(new Event('change'));
+  await onConfChange(); $('#sessSelect').value = s.id; $('#sessSelect').dispatchEvent(new Event('change'));
 });
 
-/* Start/Stop session (audio recording implied) */
+/* ================= Start/Stop session (audio implied) ================= */
 $('#startStop').addEventListener('click', async ()=>{
   try{
     if(!state.recording){
-      // ensure required fields are present; auto-fill if missing
       if(!state.confId && state.conferences.length===0){
-        // create a default conf
         const c = {id: uuid(), name: `Conference ${new Date().toISOString().slice(0,10)}`};
         await ensureConf(c); await loadManifests(); $('#confSelect').value=c.id; await onConfChange();
       }
       if(!state.sessId){
         const s = { id: uuid(), name: `Session ${new Date().toTimeString().slice(0,8)}`, vendor_id: $('#vendorSelect').value||'', started_at: new Date().toISOString(), location: $('#location').value||'' };
         await ensureSession($('#confSelect').value, s);
-        await onConfChange();
-        $('#sessSelect').value=s.id; $('#sessSelect').dispatchEvent(new Event('change'));
+        await onConfChange(); $('#sessSelect').value=s.id; $('#sessSelect').dispatchEvent(new Event('change'));
       }
       const stream = await navigator.mediaDevices.getUserMedia({audio:true});
       state.rec = new MediaRecorder(stream);
@@ -381,6 +413,7 @@ $('#startStop').addEventListener('click', async ()=>{
         const f=b2f(blob,'session_audio.m4a'); state.audios.push({file:f});
         const row=document.createElement('div'); row.textContent=`Session audio ${Math.round(f.size/1024)} KB @ ${new Date().toLocaleTimeString()}`;
         $('#log').appendChild(row);
+        updatePending();
       };
       state.rec.start(); state.recording=true; $('#recStatus').textContent='recording…';
       $('#startStop').textContent='■ Stop Session'; $('#startStop').classList.remove('primary'); $('#startStop').classList.add('danger');
@@ -393,11 +426,11 @@ $('#startStop').addEventListener('click', async ()=>{
   }catch(e){ alert('Mic error: '+(e.message||e)); }
 });
 
-/* Images add/remove */
+/* ================= Images (gallery) + remove ================= */
 $('#addImagesBtn').addEventListener('click',()=>$('#imgPick').click());
 $('#imgPick').addEventListener('change', e=>{
   const files=[...e.target.files]; const grid=$('#imgGrid');
-  files.forEach((f,i)=>{
+  files.forEach((f)=>{
     const idx = state.images.push({file:f})-1;
     const wrap=document.createElement('div'); wrap.className='thumbWrap'; wrap.dataset.idx=idx;
     const img=document.createElement('img'); img.className='thumb'; img.src=URL.createObjectURL(f);
@@ -408,98 +441,204 @@ $('#imgPick').addEventListener('change', e=>{
   updatePending();
 });
 
-/* Notes */
+/* ================= Notes ================= */
 $('#addNote').addEventListener('click', ()=>{
   const body=$('#noteText').value.trim(); if(!body) return;
   const blob=new Blob([body],{type:'text/plain'}); const f=b2f(blob,'note.txt');
   state.notes.push({file:f, body}); $('#noteText').value=''; $('#noteStatus').textContent=`${state.notes.length} notes`; updatePending();
 });
 
-/* Upload */
+/* ================= Upload core ================= */
 async function uploadOne(Key, File, ContentType){
   const cfg=getAws(); if(!cfg) throw new Error('No AWS config');
   return new Promise((res,rej)=>{
     const req=cfg.s3.upload({Bucket:cfg.bucket, Key, Body:File, ContentType});
-    req.on('httpUploadProgress',e=>{
-      // per-file progress (aggregate is handled by tick)
-    });
+    req.on('httpUploadProgress',()=>{});
     req.send((e,d)=>e?rej(e):(state.uploadedKeys.add(Key),res(d)));
   });
+}
+function resetAfterUpload(){
+  // keep selected conference; clear vendor/session selection and capture inputs
+  state.images=[]; state.audios=[]; state.notes=[]; state.uploadedKeys=new Set();
+  $('#imgGrid').innerHTML=''; $('#noteText').value=''; $('#noteStatus').textContent='0 notes';
+  $('#recStatus').textContent='not recording'; $('#overallBar').style.width='0%';
+  // leave conference selection as-is, refresh lists and recent
+  onConfChange();
+  // clear session selector to encourage new session
+  $('#sessSelect').value=''; state.sessId=''; state.sessName='';
+  updateDetails();
 }
 $('#uploadAll').addEventListener('click', async ()=>{
   try{
     setStatus('uploading…','pill'); $('#overallBar').style.width='0%';
-    // re-resolve names and IDs
     const conf = state.conferences.find(c=>c.id===state.confId) || {id:state.confId, name: $('#confSelect').selectedOptions[0]?.textContent || 'Conf'};
     const vend = (state.vendorsByConf[state.confId]||[]).find(v=>v.id===state.vendorId) || {id:state.vendorId, name: $('#vendorSelect').selectedOptions[0]?.textContent || ''};
     const sess = (state.sessionsByConf[state.confId]||[]).find(s=>s.id===state.sessId) || {id:state.sessId, name: $('#sessSelect').selectedOptions[0]?.textContent || 'Session', vendor_id: vend.id||'', location: $('#location').value||''};
-
-    // ensure manifests contain selections (in case of fresh IDs)
+    // Ensure manifests
     await ensureConf({id:conf.id, name:conf.name});
     await ensureVendor(conf.id, {id:vend.id||'', name:vend.name||''});
+    if(!sess.id){ sess.id = uuid(); sess.name = `Session ${new Date().toTimeString().slice(0,8)}`; }
     await ensureSession(conf.id, {id:sess.id, name:sess.name, vendor_id: sess.vendor_id||vend.id||'', started_at: sess.started_at||new Date().toISOString(), location: $('#location').value||''});
 
-    // session scaffolding
+    // Scaffolding (session folder)
     await uploadOne(`${mKeys.reports(conf.id)}.keep`, new Blob([''],{type:'text/plain'}), 'text/plain');
-    await uploadOne(mKeys.sessionTxt(conf.id, sess.id), new Blob([sessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)],{type:'text/plain'}), 'text/plain');
-    await uploadOne(mKeys.rollupTxt(conf.id, sess.id), new Blob([`counts: {images:0, audio:0, notes:0}\n`+sessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)],{type:'text/plain'}),'text/plain');
+    await uploadOne(mKeys.sessionTxt(conf.id, sess.id), new Blob([buildSessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)],{type:'text/plain'}), 'text/plain');
+    await uploadOne(mKeys.rollupTxt(conf.id, sess.id), new Blob([`counts: {images:0, audio:0, notes:0}\n`+buildSessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)],{type:'text/plain'}),'text/plain');
     await uploadOne(mKeys.indexTxt(conf.id, sess.id), new Blob([''],{type:'text/plain'}),'text/plain');
 
-    // totals
-    let imgN=0,audN=0,noteN=0;
-    let total = state.images.length + state.audios.length + state.notes.length + 2; // + rollup/index update
-    let done = 0; const tick=()=>{ done++; const pct=Math.round(done/total*100); $('#overallBar').style.width=pct+'%'; };
+    let imgN=0,audN=0,noteN=0; let total = state.images.length + state.audios.length + state.notes.length + 2; let done=0;
+    const tick=()=>{ done++; $('#overallBar').style.width=Math.round(done/total*100)+'%'; };
 
-    // images
+    // images under session/images/
     for(const it of state.images){
-      const name = `${sess.id}__${uniqTs()}.jpg`;
-      await uploadOne(mKeys.imageDir(conf.id)+name, it.file, 'image/jpeg'); tick();
-      await uploadOne(mKeys.imageDir(conf.id)+name.replace(/\.jpg$/,'.meta.txt'), new Blob([meta('image',conf.id,sess.id,name)],{type:'text/plain'}),'text/plain'); tick();
+      const name=`${sess.id}__${uniqTs()}.jpg`;
+      await uploadOne(mKeys.imageDir(conf.id, sess.id)+name, it.file, 'image/jpeg'); tick();
+      await uploadOne(mKeys.imageDir(conf.id, sess.id)+name.replace(/\.jpg$/,'.meta.txt'), new Blob([meta('image',conf.id,sess.id,name)],{type:'text/plain'}),'text/plain'); tick();
       imgN++;
     }
-    // audios
+    // audio under session/audio/
     for(const it of state.audios){
-      const name = `${sess.id}__${uniqTs()}.m4a`;
-      await uploadOne(mKeys.audioDir(conf.id)+name, it.file, 'audio/mp4'); tick();
-      await uploadOne(mKeys.audioDir(conf.id)+name.replace(/\.m4a$/,'.meta.txt'), new Blob([meta('audio',conf.id,sess.id,name)],{type:'text/plain'}),'text/plain'); tick();
+      const name=`${sess.id}__${uniqTs()}.m4a`;
+      await uploadOne(mKeys.audioDir(conf.id, sess.id)+name, it.file, 'audio/mp4'); tick();
+      await uploadOne(mKeys.audioDir(conf.id, sess.id)+name.replace(/\.m4a$/,'.meta.txt'), new Blob([meta('audio',conf.id,sess.id,name)],{type:'text/plain'}),'text/plain'); tick();
       audN++;
     }
-    // notes
+    // notes under session/notes/
     for(const it of state.notes){
-      const name = `${sess.id}__${uniqTs()}.txt`;
-      await uploadOne(mKeys.notesDir(conf.id)+name, it.file, 'text/plain'); tick();
-      await uploadOne(mKeys.notesDir(conf.id)+name.replace(/\.txt$/,'.meta.txt'), new Blob([meta('note',conf.id,sess.id,name)],{type:'text/plain'}),'text/plain'); tick();
+      const name=`${sess.id}__${uniqTs()}.txt`;
+      await uploadOne(mKeys.notesDir(conf.id, sess.id)+name, it.file, 'text/plain'); tick();
+      await uploadOne(mKeys.notesDir(conf.id, sess.id)+name.replace(/\.txt$/,'.meta.txt'), new Blob([meta('note',conf.id,sess.id,name)],{type:'text/plain'}),'text/plain'); tick();
       noteN++;
     }
 
     // update rollup & index
-    const rollup=[`counts: {images:${imgN}, audio:${audN}, notes:${noteN}}`, sessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)].join('\n');
+    const rollup=[`counts: {images:${imgN}, audio:${audN}, notes:${noteN}}`, buildSessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)].join('\n');
     await uploadOne(mKeys.rollupTxt(conf.id, sess.id), new Blob([rollup],{type:'text/plain'}),'text/plain'); tick();
-    const indexText = Array.from(state.uploadedKeys).filter(k=>k.startsWith(`conferences/${conf.id}/`)).join('\n');
+    const indexText = Array.from(state.uploadedKeys).filter(k=>k.startsWith(`conferences/${conf.id}/sessions/${sess.id}/`)).join('\n');
     await uploadOne(mKeys.indexTxt(conf.id, sess.id), new Blob([indexText],{type:'text/plain'}),'text/plain'); tick();
 
-    // refresh manifests (to include the new session if it was created just now)
-    await onConfChange(); updateDetails();
+    // refresh manifests and recent sessions
+    await onConfChange(); renderRecent(); updateDetails();
 
     $('#uploadHint').textContent=`Uploaded ${imgN+audN+noteN} items`; $('#uploadHint').className='pill ok';
     setStatus('upload complete','pill ok');
+    // Reset capture inputs per requirement (auto select conference persists)
+    resetAfterUpload();
   }catch(e){
     $('#uploadHint').textContent='upload failed'; $('#uploadHint').className='pill warn';
     setStatus('upload error','pill warn'); log('Upload error:', e.message||e);
   }
 });
 
-/* ===== Pending counter ===== */
+/* ================= History (bottom drawer) ================= */
+async function openHistory(s){
+  const confId = state.confId;
+  state.hist = { confId, sessId: s.id, images:[], audios:[], notes:[], rec:null, recChunks:[] };
+  $('#histTitle').textContent = s.name || 'Session';
+  // pull session.txt
+  const txt = await s3GetText(mKeys.sessionTxt(confId, s.id)) || '';
+  const roll = await s3GetText(mKeys.rollupTxt(confId, s.id)) || '';
+  $('#histMeta').textContent = (txt?txt+'\n\n':'') + (roll?roll:'');
+  $('#histGrid').innerHTML=''; $('#histAudioList').innerHTML=''; $('#histNote').value=''; $('#histCounts').textContent='0 new items';
+  $('#historyDrawer').style.display='flex';
+}
+$('#closeHistory').addEventListener('click',()=>$('#historyDrawer').style.display='none');
+
+$('#histAddImages').addEventListener('click',()=>$('#histImgPick').click());
+$('#histImgPick').addEventListener('change', e=>{
+  const files=[...e.target.files]; const grid=$('#histGrid');
+  files.forEach((f)=>{
+    const idx = state.hist.images.push({file:f})-1;
+    const wrap=document.createElement('div'); wrap.className='thumbWrap'; wrap.dataset.idx=idx;
+    const img=document.createElement('img'); img.className='thumb'; img.src=URL.createObjectURL(f);
+    const x=document.createElement('button'); x.className='xbtn'; x.textContent='×';
+    x.addEventListener('click',()=>{ state.hist.images.splice(idx,1); wrap.remove(); updateHistCounts(); });
+    wrap.appendChild(img); wrap.appendChild(x); grid.appendChild(wrap);
+  });
+  updateHistCounts();
+});
+
+$('#histRecord').addEventListener('click', async ()=>{
+  try{
+    if(!state.hist.rec){
+      const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+      state.hist.rec = new MediaRecorder(stream);
+      state.hist.rec.ondataavailable = e=> state.hist.recChunks.push(e.data);
+      state.hist.rec.onstop = ()=>{
+        const blob=new Blob(state.hist.recChunks,{type:'audio/mp4'}); state.hist.recChunks=[];
+        const f=b2f(blob,'clip.m4a'); state.hist.audios.push({file:f});
+        const row=document.createElement('div'); row.textContent=`Clip ${Math.round(f.size/1024)} KB @ ${new Date().toLocaleTimeString()}`;
+        $('#histAudioList').appendChild(row);
+        updateHistCounts();
+      };
+      state.hist.rec.start(); $('#histRecord').textContent='■ Stop Clip'; $('#histRecord').classList.remove('primary'); $('#histRecord').classList.add('danger');
+    } else {
+      state.hist.rec.stop(); state.hist.rec=null; $('#histRecord').textContent='● Record Clip'; $('#histRecord').classList.remove('danger'); $('#histRecord').classList.add('primary');
+    }
+  }catch(e){ alert('Mic error: '+(e.message||e)); }
+});
+$('#histAddNote').addEventListener('click', ()=>{
+  const body=$('#histNote').value.trim(); if(!body) return;
+  const blob=new Blob([body],{type:'text/plain'}); const f=b2f(blob,'note.txt'); state.hist.notes.push({file:f, body});
+  $('#histNote').value=''; updateHistCounts();
+});
+function updateHistCounts(){
+  const n = state.hist.images.length + state.hist.audios.length + state.hist.notes.length;
+  $('#histCounts').textContent = `${n} new items`;
+}
+
+/* Upload to existing session from history drawer */
+$('#histUpload').addEventListener('click', async ()=>{
+  const confId=state.hist.confId, sessId=state.hist.sessId;
+  try{
+    let imgN=0,audN=0,noteN=0; let total=state.hist.images.length+state.hist.audios.length+state.hist.notes.length+2; let done=0;
+    const tick=()=>{ done++; $('#overallBar').style.width=Math.round(done/total*100)+'%'; };
+    // images
+    for(const it of state.hist.images){
+      const name=`${sessId}__${uniqTs()}.jpg`;
+      await uploadOne(mKeys.imageDir(confId, sessId)+name, it.file, 'image/jpeg'); tick();
+      await uploadOne(mKeys.imageDir(confId, sessId)+name.replace(/\.jpg$/,'.meta.txt'), new Blob([meta('image',confId,sessId,name)],{type:'text/plain'}),'text/plain'); tick();
+      imgN++;
+    }
+    // audio
+    for(const it of state.hist.audios){
+      const name=`${sessId}__${uniqTs()}.m4a`;
+      await uploadOne(mKeys.audioDir(confId, sessId)+name, it.file, 'audio/mp4'); tick();
+      await uploadOne(mKeys.audioDir(confId, sessId)+name.replace(/\.m4a$/,'.meta.txt'), new Blob([meta('audio',confId,sessId,name)],{type:'text/plain'}),'text/plain'); tick();
+      audN++;
+    }
+    // notes
+    for(const it of state.hist.notes){
+      const name=`${sessId}__${uniqTs()}.txt`;
+      await uploadOne(mKeys.notesDir(confId, sessId)+name, it.file, 'text/plain'); tick();
+      await uploadOne(mKeys.notesDir(confId, sessId)+name.replace(/\.txt$/,'.meta.txt'), new Blob([meta('note',confId,sessId,name)],{type:'text/plain'}),'text/plain'); tick();
+      noteN++;
+    }
+    // update rollup counts quickly (read, adjust, write) — simple: write new counts line; accurate count requires reading lists; we append-summary here.
+    const rollup = `counts: {images:+${imgN}, audio:+${audN}, notes:+${noteN}}\nupdated_at: ${new Date().toISOString()}`;
+    await uploadOne(mKeys.rollupTxt(confId, sessId), new Blob([rollup],{type:'text/plain'}),'text/plain'); tick();
+
+    // update index
+    const indexText = Array.from(state.uploadedKeys).filter(k=>k.startsWith(`conferences/${confId}/sessions/${sessId}/`)).join('\n');
+    await uploadOne(mKeys.indexTxt(confId, sessId), new Blob([indexText],{type:'text/plain'}),'text/plain'); tick();
+
+    // clear drawer inputs
+    state.hist.images=[]; state.hist.audios=[]; state.hist.notes=[]; $('#histGrid').innerHTML=''; $('#histAudioList').innerHTML=''; $('#histCounts').textContent='0 new items';
+    // refresh recent
+    await onConfChange(); renderRecent();
+    setStatus('uploaded to session','pill ok');
+  }catch(e){ setStatus('history upload error','pill warn'); log('History upload error:', e.message||e); }
+});
+
+/* ================= Pending badge ================= */
 function updatePending(){ const n=state.images.length+state.audios.length+state.notes.length; $('#uploadHint').textContent=`${n} items pending`; }
 
-/* ===== Boot ===== */
+/* ================= Boot ================= */
 (async function boot(){
-  loadAws(); // settings
-  $('#drawer').style.display='none';
+  loadAws();
+  $('#drawer').style.display='none'; $('#historyDrawer').style.display='none';
   setStatus('ready','pill');
-  try{
-    await loadManifests();
-  }catch{}
+  try{ await loadManifests(); }catch(e){ log('Manifest load issue:', e.message||e); }
   updatePending();
 })();
 </script>
