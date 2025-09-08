@@ -59,7 +59,6 @@
   <div class="card">
     <h2>Session Controls</h2>
 
-    <!-- Selection row -->
     <div class="row">
       <div>
         <label>Conference</label>
@@ -94,13 +93,12 @@
     <div class="toolbar" style="margin-top:8px">
       <button id="startStop" class="bigbtn primary" style="flex:1">● Start Session (rec)</button>
       <button id="addImagesBtn" class="bigbtn blue" style="flex:1">📷 Add Image(s)</button>
-      <!-- Gallery picker (multiple) -->
       <input id="imgPick" type="file" accept="image/*" multiple class="hidden">
     </div>
     <div class="pill" id="recStatus">not recording</div>
   </div>
 
-  <!-- NOTES (center big) -->
+  <!-- NOTES -->
   <div class="card">
     <h2>Notes</h2>
     <textarea id="noteText" placeholder="Type notes while recording…"></textarea>
@@ -146,7 +144,7 @@
   </div>
 </div>
 
-<!-- SETTINGS DRAWER (right) -->
+<!-- SETTINGS DRAWER -->
 <div id="drawer" class="drawer">
   <div class="sheet">
     <div class="topbar" style="margin-bottom:10px">
@@ -154,7 +152,7 @@
       <button id="closeDrawer" class="iconbtn">✖</button>
     </div>
     <label>Region</label><input id="region" placeholder="eu-west-2"/>
-    <label>Bucket</label><input id="bucket" placeholder="confbud"/>
+    <label>Bucket</label><input id="bucket" placeholder="YOUR_BUCKET_NAME"/>
     <div class="row">
       <div><label>Access Key</label><input id="ak" placeholder="AKIA…"/></div>
       <div><label>Secret</label><input id="sk" placeholder="••••"/></div>
@@ -164,7 +162,7 @@
       <button id="testAws" class="bigbtn">🔌 Test</button>
       <span id="awsStatus" class="pill">not configured</span>
     </div>
-    <small>Keys are stored in your browser only (localStorage). Configure S3 CORS for your site origin.</small>
+    <small>Keys are stored in your browser only (localStorage). Ensure S3 CORS permits your site origin for GET/PUT/HEAD/POST.</small>
   </div>
 </div>
 
@@ -198,17 +196,15 @@
 </div>
 
 <script>
-/* ================= Utilities ================= */
+/* ============ Utilities ============ */
 const $=s=>document.querySelector(s);
 const iso=t=>new Date(t||Date.now()).toISOString().replace(/:/g,'-');
 const uuid=()=>crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)});
 const b2f=(blob,name)=>new File([blob],name,{type:blob.type});
 const log=(...a)=>{const L=$('#log');L.textContent+=a.join(' ')+'\n';L.scrollTop=L.scrollHeight}
 const setStatus=(t,cls='pill')=>{const el=$('#status');el.textContent=t;el.className=cls;}
-const mimeFromName=n=>n.endsWith('.jpg')?'image/jpeg':n.endsWith('.m4a')?'audio/mp4':'text/plain';
 let _lastTs=''; let _tsCount=0; const uniqTs=()=>{const t=iso(); if(t===_lastTs){_tsCount++;return `${t}__${_tsCount}`;} _lastTs=t; _tsCount=0; return t;};
 
-// Preserve original content types & extensions
 function extFromMime(mime){
   if(!mime) return '';
   const m=mime.toLowerCase();
@@ -229,7 +225,7 @@ function nameWithOriginalExt(file, baseNoExt, fallbackExt){
   return baseNoExt+(fallbackExt||'');
 }
 
-/* ================= State ================= */
+/* ============ State ============ */
 let state={
   conferences:[], vendorsByConf:{}, sessionsByConf:{},
   confId:'', vendorId:'', sessId:'',
@@ -238,29 +234,26 @@ let state={
   hist:{ sessId:'', confId:'', images:[], audios:[], notes:[], rec:null, recChunks:[] }
 };
 
-/* ================= AWS config ================= */
+/* ============ AWS config ============ */
 function loadAws(){ try{const s=JSON.parse(localStorage.cbud_aws||'{}');
-  $('#region').value=s.region||'eu-west-2'; $('#bucket').value=s.bucket||'confbud'; $('#ak').value=s.ak||''; $('#sk').value=s.sk||'';
-  if(s.ak&&s.sk){ $('#awsStatus').textContent='loaded'; $('#awsStatus').className='pill ok'; } else { $('#awsStatus').textContent='not configured'; $('#awsStatus').className='pill'; }
-}catch{ $('#region').value='eu-west-2'; $('#bucket').value='confbud'; }}
-function saveAws(){ const s={region:$('#region').value.trim()||'eu-west-2',bucket:$('#bucket').value.trim()||'confbud',ak:$('#ak').value.trim(),sk:$('#sk').value.trim()};
+  $('#region').value=s.region||'eu-west-2'; $('#bucket').value=s.bucket||''; $('#ak').value=s.ak||''; $('#sk').value=s.sk||'';
+  if(s.ak&&s.sk&&s.bucket){ $('#awsStatus').textContent='loaded'; $('#awsStatus').className='pill ok'; } else { $('#awsStatus').textContent='not configured'; $('#awsStatus').className='pill'; }
+}catch{ $('#region').value='eu-west-2'; }}
+function saveAws(){ const s={region:$('#region').value.trim()||'eu-west-2',bucket:$('#bucket').value.trim(),ak:$('#ak').value.trim(),sk:$('#sk').value.trim()};
   localStorage.cbud_aws=JSON.stringify(s); $('#awsStatus').textContent='saved'; $('#awsStatus').className='pill ok'; }
 function getAws(){ const s=JSON.parse(localStorage.cbud_aws||'{}'); if(!(s.ak&&s.sk&&s.region&&s.bucket)) return null;
-  AWS.config.update({region:s.region, credentials:new AWS.Credentials(s.ak,s.sk)}); return { s3:new AWS.S3({apiVersion:'2006-03-01',params:{Bucket:s.bucket}}), bucket:s.bucket, region:s.region }; }
+  AWS.config.update({region:s.region, credentials:new AWS.Credentials(s.ak,s.sk)}); return { s3:new AWS.S3({apiVersion:'2006-03-01',params:{Bucket:s.bucket}}), bucket:s.bucket }; }
 async function testAws(){ const cfg=getAws(); if(!cfg){$('#awsStatus').textContent='missing';$('#awsStatus').className='pill warn';return;}
   try{const Key=`cbud_test_${Date.now()}.txt`;
-    await new Promise((res,rej)=>cfg.s3.upload({Bucket:cfg.bucket,Key,Body:'ok',ContentType:'text/plain'}).send((e,d)=>e?rej(e):res(d)));
+    await new Promise((res,rej)=>cfg.s3.upload({Bucket:cfg.bucket,Key,Body:'ok',ContentType:'text/plain'},{partSize:20*1024*1024}).send((e,d)=>e?rej(e):res(d)));
     $('#awsStatus').textContent='connected'; $('#awsStatus').className='pill ok'; log('AWS test OK → s3://'+cfg.bucket+'/'+Key);
   }catch(e){ $('#awsStatus').textContent='failed'; $('#awsStatus').className='pill warn'; log('AWS test failed:', e.code||'', e.message||e); }}
 
-/* ================= S3 helpers ================= */
-async function s3Put(Key, Body, ContentType){ const cfg=getAws(); if(!cfg) throw new Error('No AWS config'); return new Promise((res,rej)=>cfg.s3.upload({Bucket:cfg.bucket,Key,Body,ContentType}).send((e,d)=>e?rej(e):res(d))); }
-async function s3GetText(Key){ const cfg=getAws(); if(!cfg) throw new Error('No AWS config'); try{ const data=await cfg.s3.getObject({Bucket:cfg.bucket,Key}).promise(); return new TextDecoder().decode(data.Body);
-}catch(e){ if(e.code==='NoSuchKey') return null; throw e; } }
+/* ============ S3 helpers & keys ============ */
+async function s3GetText(Key){ const cfg=getAws(); if(!cfg) throw new Error('No AWS config'); try{ const data=await cfg.s3.getObject({Bucket:cfg.bucket,Key}).promise(); return new TextDecoder().decode(data.Body);}catch(e){ if(e.code==='NoSuchKey') return null; throw e; } }
 async function s3GetJson(Key){ const txt=await s3GetText(Key); return txt?JSON.parse(txt):null; }
-async function s3PutJson(Key, obj){ return s3Put(Key, new Blob([JSON.stringify(obj)],{type:'application/json'}), 'application/json'); }
+async function s3PutJson(Key, obj){ const cfg=getAws(); if(!cfg) throw new Error('No AWS config'); return new Promise((res,rej)=>cfg.s3.upload({Bucket:cfg.bucket,Key,Body:new Blob([JSON.stringify(obj)],{type:'application/json'}),ContentType:'application/json'},{partSize:20*1024*1024}).send((e,d)=>e?rej(e):res(d))); }
 
-/* ================= Keys / Structure ================= */
 const mKeys = {
   confIndex : ()=> `conferences/index.json`,
   vendors   : (confId)=> `conferences/${confId}/vendors.json`,
@@ -275,7 +268,7 @@ const mKeys = {
   notesDir  : (confId,sessId)=>`conferences/${confId}/sessions/${sessId}/notes/`,
 };
 
-/* ================= Manifests ================= */
+/* ============ Manifests & UI lists ============ */
 async function loadManifests(){
   const confs = await s3GetJson(mKeys.confIndex()) || { conferences:[] };
   state.conferences = confs.conferences;
@@ -312,14 +305,12 @@ function populateSessSelect(){
   for(const s of list){ const o=document.createElement('option'); o.value=s.id; o.textContent=s.name; if(s.id===last) o.selected=true; sel.appendChild(o); }
   if(!sel.value && list[0]) sel.value=list[0].id;
   state.sessId = sel.value || ''; const selObj=list.find(s=>s.id===state.sessId)||{};
-  $('#location').value = selObj?.location || '';
-  state.sessName = selObj?.name || '';
+  $('#location').value = selObj?.location || ''; state.sessName = selObj?.name || '';
 }
 function renderRecent(){
   const box=$('#recentList'); box.innerHTML='';
   const list = state.sessionsByConf[state.confId]||[];
-  const top = list.slice(0,8);
-  for(const s of top){
+  for(const s of list.slice(0,8)){
     const item=document.createElement('div'); item.className='item';
     const when = s.started_at ? new Date(s.started_at).toLocaleString() : '—';
     item.innerHTML = `<b>${s.name}</b><br><small>${when}</small>`;
@@ -338,13 +329,13 @@ function updateDetails(){
   $('#dIds').textContent = `conf=${state.confId} · vendor=${state.vendorId} · session=${state.sessId}`;
 }
 
-/* ================= Ensure create in manifests (silent) ================= */
+/* ============ Ensure (silent) ============ */
 async function ensureConf(conference){
   const confs = await s3GetJson(mKeys.confIndex()) || { conferences:[] };
   if(!confs.conferences.find(c=>c.id===conference.id)){ confs.conferences.push(conference); await s3PutJson(mKeys.confIndex(), confs); }
 }
 async function ensureVendor(confId, vendor){
-  if(!vendor?.id) return; // optional vendor
+  if(!vendor?.id) return;
   const v = await s3GetJson(mKeys.vendors(confId)) || { vendors:[] };
   if(!v.vendors.find(x=>x.id===vendor.id)){ v.vendors.push(vendor); await s3PutJson(mKeys.vendors(confId), v); }
 }
@@ -352,26 +343,20 @@ async function ensureSession(confId, session){
   const s = await s3GetJson(mKeys.sessIndex(confId)) || { sessions:[] };
   if(!s.sessions.find(x=>x.id===session.id)){ s.sessions.push(session); await s3PutJson(mKeys.sessIndex(confId), s); }
 }
-/* Silent context ensure: conference + session (vendor optional) */
 async function ensureCurrentContext(){
-  // ensure conference
   if(!state.confId){
-    // default: create today's conference once
     const conf = { id: uuid(), name: `Conference ${new Date().toISOString().slice(0,10)}` };
-    await ensureConf(conf);
-    await loadManifests();
+    await ensureConf(conf); await loadManifests();
     $('#confSelect').value = conf.id; await onConfChange();
   }
-  // ensure session
   if(!state.sessId){
     const sess = { id: uuid(), name: `Session ${new Date().toTimeString().slice(0,8)}`, vendor_id: $('#vendorSelect').value||'', started_at: new Date().toISOString(), location: $('#location').value||'' };
-    await ensureSession(state.confId, sess);
-    await onConfChange();
+    await ensureSession(state.confId, sess); await onConfChange();
     $('#sessSelect').value = sess.id; $('#sessSelect').dispatchEvent(new Event('change'));
   }
 }
 
-/* ================= Session .txt + meta ================= */
+/* ============ Session text & meta ============ */
 function buildSessionTxt(confId, confName, sessId, sessName, vendorName, location){
   return [
     `conference_id: ${confId}`,
@@ -392,11 +377,11 @@ function meta(kind,confId,sessId,name){
     `filename: ${name}`,
     `created_at: ${new Date().toISOString()}`,
     `app_version: 1`,
-    `mime: ${mimeFromName(name)}`
+    `mime: ${(name||'').endsWith('.m4a')?'audio/mp4':(name||'').endsWith('.txt')?'text/plain':'image/*'}`
   ].join('\n');
 }
 
-/* ================= UI: settings + selectors ================= */
+/* ============ Settings & selectors ============ */
 $('#settingsBtn').addEventListener('click',()=>$('#drawer').style.display='flex');
 $('#closeDrawer').addEventListener('click',()=>$('#drawer').style.display='none');
 $('#saveAws').addEventListener('click',saveAws);
@@ -427,11 +412,11 @@ $('#newSess').addEventListener('click', async ()=>{
   await onConfChange(); $('#sessSelect').value = s.id; $('#sessSelect').dispatchEvent(new Event('change'));
 });
 
-/* ================= Start/Stop session (audio implied, auto create) ================= */
+/* ============ Start/Stop recording ============ */
 $('#startStop').addEventListener('click', async ()=>{
   try{
     if(!state.recording){
-      await ensureCurrentContext(); // silent create if needed
+      await ensureCurrentContext();
       const stream = await navigator.mediaDevices.getUserMedia({audio:true});
       state.rec = new MediaRecorder(stream);
       state.rec.ondataavailable = e=> state.recChunks.push(e.data);
@@ -453,11 +438,11 @@ $('#startStop').addEventListener('click', async ()=>{
   }catch(e){ alert('Mic error: '+(e.message||e)); }
 });
 
-/* ================= Images (gallery) + remove ================= */
+/* ============ Images (gallery) + remove ============ */
 $('#addImagesBtn').addEventListener('click',()=>$('#imgPick').click());
 $('#imgPick').addEventListener('change', e=>{
   const files=[...e.target.files]; const grid=$('#imgGrid');
-  files.forEach((f, i)=>{
+  files.forEach((f)=>{
     const idx = state.images.push({file:f})-1;
     const wrap=document.createElement('div'); wrap.className='thumbWrap'; wrap.dataset.idx=idx;
     const img=document.createElement('img'); img.className='thumb'; img.src=URL.createObjectURL(f);
@@ -468,35 +453,30 @@ $('#imgPick').addEventListener('change', e=>{
   updatePending();
 });
 
-/* ================= Notes ================= */
+/* ============ Notes ============ */
 $('#addNote').addEventListener('click', ()=>{
   const body=$('#noteText').value.trim(); if(!body) return;
   const blob=new Blob([body],{type:'text/plain'}); const f=b2f(blob,'note.txt');
   state.notes.push({file:f, body}); $('#noteText').value=''; $('#noteStatus').textContent=`${state.notes.length} notes`; updatePending();
 });
 
-/* ================= Upload core (auto create session) ================= */
+/* ============ Upload core (force single-PUT for typical media) ============ */
 async function uploadOne(Key, File, ContentType){
   const cfg=getAws(); if(!cfg) throw new Error('No AWS config');
+  const opts = { partSize: 20 * 1024 * 1024, queueSize: 2 }; // <-- avoid multipart POSTs under 20MB
   return new Promise((res,rej)=>{
-    const req=cfg.s3.upload({Bucket:cfg.bucket, Key, Body:File, ContentType});
+    const req=cfg.s3.upload({Bucket:cfg.bucket, Key, Body:File, ContentType}, opts);
     req.on('httpUploadProgress',()=>{});
     req.send((e,d)=>e?rej(e):(state.uploadedKeys.add(Key),res(d)));
   });
 }
 function resetAfterUpload(){
-  // keep current conference selected; clear capture inputs
   state.images=[]; state.audios=[]; state.notes=[]; state.uploadedKeys=new Set();
   $('#imgGrid').innerHTML=''; $('#noteText').value=''; $('#noteStatus').textContent='0 notes';
   $('#recStatus').textContent='not recording'; $('#overallBar').style.width='0%';
-  // refresh lists and recent
-  onConfChange();
-  // clear session selector to encourage a new auto-created session next time
-  $('#sessSelect').value=''; state.sessId=''; state.sessName='';
-  updateDetails();
+  onConfChange(); // refresh lists & recent but keep current conference
+  $('#sessSelect').value=''; state.sessId=''; state.sessName=''; updateDetails();
 }
-
-/* Auto-include typed note if not added */
 function maybeAutoAddCurrentNote(){
   const body = ($('#noteText')?.value || '').trim();
   if (body) {
@@ -511,22 +491,18 @@ function maybeAutoAddCurrentNote(){
 $('#uploadAll').addEventListener('click', async ()=>{
   try{
     setStatus('uploading…','pill'); $('#overallBar').style.width='0%';
-    await ensureCurrentContext(); // silently ensure conf/session for this upload
+    await ensureCurrentContext();
 
-    // Resolve names/ids
     const conf = state.conferences.find(c=>c.id===state.confId) || {id:state.confId, name: $('#confSelect').selectedOptions[0]?.textContent || 'Conf'};
     const vend = (state.vendorsByConf[state.confId]||[]).find(v=>v.id===state.vendorId) || {id:state.vendorId, name: $('#vendorSelect').selectedOptions[0]?.textContent || ''};
     const sess = (state.sessionsByConf[state.confId]||[]).find(s=>s.id===state.sessId) || {id:state.sessId, name: $('#sessSelect').selectedOptions[0]?.textContent || 'Session', vendor_id: vend.id||'', location: $('#location').value||''};
 
-    // Include any un-added note typed in textarea
     maybeAutoAddCurrentNote();
 
-    // Ensure manifests contain current selection (no-ops if already present)
     await ensureConf({id:conf.id, name:conf.name});
     await ensureVendor(conf.id, {id:vend.id||'', name:vend.name||''});
     await ensureSession(conf.id, {id:sess.id, name:sess.name, vendor_id: sess.vendor_id||vend.id||'', started_at: sess.started_at||new Date().toISOString(), location: $('#location').value||''});
 
-    // Scaffolding (session folder)
     await uploadOne(`${mKeys.reports(conf.id)}.keep`, new Blob([''],{type:'text/plain'}), 'text/plain');
     await uploadOne(mKeys.sessionTxt(conf.id, sess.id), new Blob([buildSessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)],{type:'text/plain'}), 'text/plain');
     await uploadOne(mKeys.rollupTxt(conf.id, sess.id), new Blob([`counts: {images:0, audio:0, notes:0}\n`+buildSessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)],{type:'text/plain'}),'text/plain');
@@ -535,7 +511,7 @@ $('#uploadAll').addEventListener('click', async ()=>{
     let imgN=0,audN=0,noteN=0; let total = state.images.length + state.audios.length + state.notes.length + 2; let done=0;
     const tick=()=>{ done++; $('#overallBar').style.width=Math.round(done/total*100)+'%'; };
 
-    // IMAGES (preserve type/ext)
+    // IMAGES (single PUTs; keep original type/ext)
     for (const it of state.images) {
       try{
         const fnameBase=`${sess.id}__${uniqTs()}`;
@@ -570,25 +546,22 @@ $('#uploadAll').addEventListener('click', async ()=>{
       }catch(e){ log('❌ note failed:', e.message||e); }
     }
 
-    // update rollup & index
     const rollup=[`counts: {images:${imgN}, audio:${audN}, notes:${noteN}}`, buildSessionTxt(conf.id, conf.name, sess.id, sess.name, vend.name, $('#location').value)].join('\n');
     await uploadOne(mKeys.rollupTxt(conf.id, sess.id), new Blob([rollup],{type:'text/plain'}),'text/plain'); tick();
     const indexText = Array.from(state.uploadedKeys).filter(k=>k.startsWith(`conferences/${conf.id}/sessions/${sess.id}/`)).join('\n');
     await uploadOne(mKeys.indexTxt(conf.id, sess.id), new Blob([indexText],{type:'text/plain'}),'text/plain'); tick();
 
-    // refresh manifests and recent sessions
     await onConfChange(); renderRecent(); updateDetails();
-
     $('#uploadHint').textContent=`Uploaded ${imgN+audN+noteN} items`; $('#uploadHint').className='pill ok';
     setStatus('upload complete','pill ok');
-    resetAfterUpload(); // keep conference, clear inputs
+    resetAfterUpload();
   }catch(e){
     $('#uploadHint').textContent='upload failed'; $('#uploadHint').className='pill warn';
     setStatus('upload error','pill warn'); log('Upload error:', e.message||e);
   }
 });
 
-/* ================= History (bottom drawer) ================= */
+/* ============ History drawer ============ */
 async function openHistory(s){
   const confId = state.confId;
   state.hist = { confId, sessId: s.id, images:[], audios:[], notes:[], rec:null, recChunks:[] };
@@ -643,12 +616,9 @@ function updateHistCounts(){
   const n = state.hist.images.length + state.hist.audios.length + state.hist.notes.length;
   $('#histCounts').textContent = `${n} new items`;
 }
-
-/* Upload to existing session from history drawer (with ext/mime fixes) */
 $('#histUpload').addEventListener('click', async ()=>{
   const confId=state.hist.confId, sessId=state.hist.sessId;
   try{
-    // include typed note if not added
     const b = ($('#histNote')?.value||'').trim();
     if(b){ const blob=new Blob([b],{type:'text/plain'}); state.hist.notes.push({file:b2f(blob,'note.txt'), body:b}); $('#histNote').value=''; }
 
@@ -685,34 +655,28 @@ $('#histUpload').addEventListener('click', async ()=>{
       }catch(e){ log('❌ note failed (hist):', e.message||e); }
     }
 
-    // lightweight rollup delta + index update
     const rollup = `counts: {images:+${imgN}, audio:+${audN}, notes:+${noteN}}\nupdated_at: ${new Date().toISOString()}`;
     await uploadOne(mKeys.rollupTxt(confId, sessId), new Blob([rollup],{type:'text/plain'}),'text/plain'); tick();
     const indexText = Array.from(state.uploadedKeys).filter(k=>k.startsWith(`conferences/${confId}/sessions/${sessId}/`)).join('\n');
     await uploadOne(mKeys.indexTxt(confId, sessId), new Blob([indexText],{type:'text/plain'}),'text/plain'); tick();
 
-    // clear drawer inputs
     state.hist.images=[]; state.hist.audios=[]; state.hist.notes=[]; $('#histGrid').innerHTML=''; $('#histAudioList').innerHTML=''; $('#histCounts').textContent='0 new items';
     await onConfChange(); renderRecent();
     setStatus('uploaded to session','pill ok');
   }catch(e){ setStatus('history upload error','pill warn'); log('History upload error:', e.message||e); }
 });
 
-/* ================= Pending badge ================= */
+/* ============ Pending badge & boot ============ */
 function updatePending(){ const n=state.images.length+state.audios.length+state.notes.length; $('#uploadHint').textContent=`${n} items pending`; }
 
-/* ================= Boot ================= */
 (async function boot(){
-  loadAws();
-  $('#drawer').style.display='none'; $('#historyDrawer').style.display='none';
+  loadAws(); $('#drawer').style.display='none'; $('#historyDrawer').style.display='none';
   setStatus('ready','pill');
   try{
     await loadManifests();
-    // If no conferences exist, silently create a default for today
     if(!state.conferences?.length){
       const conf = { id: uuid(), name: `Conference ${new Date().toISOString().slice(0,10)}` };
-      await ensureConf(conf);
-      await loadManifests();
+      await ensureConf(conf); await loadManifests();
       $('#confSelect').value = conf.id; await onConfChange(); updateDetails();
     }
   }catch(e){ log('Manifest load issue:', e.message||e); }
